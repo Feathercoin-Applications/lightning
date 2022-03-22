@@ -222,27 +222,29 @@ const struct chainparams networks[] = {
      .bip32_key_version = {.bip32_pubkey_version = BIP32_VER_MAIN_PUBLIC,
 			   .bip32_privkey_version = BIP32_VER_MAIN_PRIVATE},
      .is_elements = true},
-     
+
          {.network_name = "feathercoin",
      .onchain_hrp = "fc",
      .lightning_hrp = "fc",
      .bip70_name = "main",
-     .genesis_blockhash = {{{.u.u8 = {0xa7, 0x65, 0xe3, 0x1f, 0xfd, 0x40, 0x59, 
-                      0xba, 0xda, 0x1e, 0x25, 0x19, 0x0f, 0x6e, 
-                      0x98, 0xc9, 0x9d, 0x97, 0x14, 0xd3, 0x34,
-                      0xef, 0xa4, 0x1a, 0x19, 0x5a, 0x7e, 0x7e,
-                      0x04, 0xbf, 0xe2}}}},
-                      
+
+	//12a765e31ffd4059bada1e25190f6e98c99d9714d334efa41a195a7e7e04bfe2
+ .genesis_blockhash = {{{.u.u8 = {0xe2, 0xbf, 0x04, 0x7e, 0x7e, 0x5a, 0x19,
+				      0x1a, 0xa4, 0xef, 0x34, 0xd3, 0x14, 0x97,
+				      0x9d, 0xc9, 0x98, 0x6e, 0x0f, 0x19, 0x25,
+				      0x1e, 0xda, 0xba, 0x59, 0x40, 0xfd, 0x1f,
+				      0xe3, 0x65, 0xa7, 0x12}}}},
+
      .rpc_port = 9336,
      .cli = "feathercoin-cli",
      .cli_args = NULL,
      .cli_min_supported_version = 150000,
-     .dust_limit = { 100000 },
-     .max_funding = AMOUNT_SAT_INIT(60 * ((1 << 24) - 1)),
+     .dust_limit = { 546 },
+     .max_funding = AMOUNT_SAT_INIT(((1 << 24) - 1)),
      .max_payment = AMOUNT_MSAT_INIT(60 * 0xFFFFFFFFULL),
      .when_lightning_became_cool = 4087000,
-     .p2pkh_version = 113,
-     .p2sh_version = 50,
+     .p2pkh_version = 0x14,
+     .p2sh_version = 0x5,
      .testnet = false,
      .fee_asset_tag = NULL,
      .bip32_key_version = {.bip32_pubkey_version = BIP32_VER_MAIN_PUBLIC,
@@ -254,11 +256,11 @@ const struct chainparams networks[] = {
      .bip70_name = "feathercoin-test",
      .genesis_blockhash = {{{.u.u8 = {0x79, 0xe4, 0x68, 0x3a, 0x94, 0xfb, 0x03,
                       0x74, 0xac, 0x9d, 0x52, 0x63, 0x8b, 0x59,
-                      0x4d, 0xcf, 0x03, 0x18, 0x97, 0x5a, 0xcb, 
-                      0x8b, 0x27, 0x5e, 0x28, 0x0f, 0x93, 0xc0, 
+                      0x4d, 0xcf, 0x03, 0x18, 0x97, 0x5a, 0xcb,
+                      0x8b, 0x27, 0x5e, 0x28, 0x0f, 0x93, 0xc0,
                       0x82, 0xc0, 0x96, 0x4c}}}},
-                      
-                      
+
+
      .rpc_port = 19336,
      .cli = "feathercoin-cli",
      .cli_args = "-testnet",
