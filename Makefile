@@ -3,10 +3,6 @@
 # Extract version from git, or if we're from a zipfile, use dirname
 VERSION=$(shell git describe --always --dirty=-modded --abbrev=7 2>/dev/null || pwd | sed -n 's|.*/c\{0,1\}lightning-v\{0,1\}\([0-9a-f.rc\-]*\)$$|\1|gp')
 
-ifeq ($(VERSION),)
-$(error "ERROR: git is required for generating version information")
-endif
-
 # --quiet / -s means quiet, dammit!
 ifeq ($(findstring s,$(word 1, $(MAKEFLAGS))),s)
 ECHO := :
@@ -17,14 +13,17 @@ SUPPRESS_OUTPUT :=
 endif
 
 DISTRO=$(shell lsb_release -is 2>/dev/null || echo unknown)-$(shell lsb_release -rs 2>/dev/null || echo unknown)
+OS=$(shell uname -s)
+ARCH=$(shell uname -m)
+# Changing this could break installs!
 PKGNAME = c-lightning
 
 # We use our own internal ccan copy.
 CCANDIR := ccan
 
 # Where we keep the BOLT RFCs
-BOLTDIR := ../lightning-rfc/
-DEFAULT_BOLTVERSION := 498f104fd399488c77f449d05cb21c0b604636a2
+BOLTDIR := ../bolts/
+DEFAULT_BOLTVERSION := f32c6ddb5f11b431c9bb4f501cdec604172a90de
 # Can be overridden on cmdline.
 BOLTVERSION := $(DEFAULT_BOLTVERSION)
 
@@ -75,14 +74,18 @@ endif
 
 ifeq ($(COMPAT),1)
 # We support compatibility with pre-0.6.
-COMPAT_CFLAGS=-DCOMPAT_V052=1 -DCOMPAT_V060=1 -DCOMPAT_V061=1 -DCOMPAT_V062=1 -DCOMPAT_V070=1 -DCOMPAT_V072=1 -DCOMPAT_V073=1 -DCOMPAT_V080=1 -DCOMPAT_V081=1 -DCOMPAT_V082=1 -DCOMPAT_V090=1 -DCOMPAT_V0100=1
+COMPAT_CFLAGS=-DCOMPAT_V052=1 -DCOMPAT_V060=1 -DCOMPAT_V061=1 -DCOMPAT_V062=1 -DCOMPAT_V070=1 -DCOMPAT_V072=1 -DCOMPAT_V073=1 -DCOMPAT_V080=1 -DCOMPAT_V081=1 -DCOMPAT_V082=1 -DCOMPAT_V090=1 -DCOMPAT_V0100=1 -DCOMPAT_V0121=1
 endif
 
 # (method=thread to support xdist)
 PYTEST_OPTS := -v -p no:logging $(PYTEST_OPTS)
 MY_CHECK_PYTHONPATH=$${PYTHONPATH}$${PYTHONPATH:+:}$(shell pwd)/contrib/pyln-client:$(shell pwd)/contrib/pyln-testing:$(shell pwd)/contrib/pyln-proto/:$(shell pwd)/external/lnprototest:$(shell pwd)/contrib/pyln-spec/bolt1:$(shell pwd)/contrib/pyln-spec/bolt2:$(shell pwd)/contrib/pyln-spec/bolt4:$(shell pwd)/contrib/pyln-spec/bolt7
 # Collect generated python files to be excluded from lint checks
-PYTHON_GENERATED=
+PYTHON_GENERATED= \
+	contrib/pyln-testing/pyln/testing/primitives_pb2.py \
+	contrib/pyln-testing/pyln/testing/node_pb2_grpc.py \
+	contrib/pyln-testing/pyln/testing/node_pb2.py \
+	contrib/pyln-testing/pyln/testing/grpc2py.py
 
 # Options to pass to cppcheck. Mostly used to exclude files that are
 # generated with external tools that we don't have control over
@@ -93,6 +96,7 @@ FEATURES :=
 
 CCAN_OBJS :=					\
 	ccan-asort.o				\
+	ccan-base64.o				\
 	ccan-bitmap.o				\
 	ccan-bitops.o				\
 	ccan-breakpoint.o			\
@@ -128,6 +132,8 @@ CCAN_OBJS :=					\
 	ccan-ptr_valid.o			\
 	ccan-rbuf.o				\
 	ccan-read_write_all.o			\
+	ccan-rune-coding.o			\
+	ccan-rune-rune.o			\
 	ccan-str-base32.o			\
 	ccan-str-hex.o				\
 	ccan-str.o				\
@@ -196,6 +202,8 @@ CCAN_HEADERS :=						\
 	$(CCANDIR)/ccan/ptrint/ptrint.h			\
 	$(CCANDIR)/ccan/rbuf/rbuf.h			\
 	$(CCANDIR)/ccan/read_write_all/read_write_all.h	\
+	$(CCANDIR)/ccan/rune/internal.h			\
+	$(CCANDIR)/ccan/rune/rune.h			\
 	$(CCANDIR)/ccan/short_types/short_types.h	\
 	$(CCANDIR)/ccan/str/base32/base32.h		\
 	$(CCANDIR)/ccan/str/hex/hex.h			\
@@ -227,14 +235,29 @@ WIRE_GEN_DEPS := $(WIRE_GEN) $(wildcard tools/gen/*_template)
 # These are filled by individual Makefiles
 ALL_PROGRAMS :=
 ALL_TEST_PROGRAMS :=
+ALL_TEST_GEN :=
 ALL_FUZZ_TARGETS :=
 ALL_C_SOURCES :=
 ALL_C_HEADERS := header_versions_gen.h version_gen.h
 # Extra (non C) targets that should be built by default.
 DEFAULT_TARGETS :=
 
+# M1 macos machines with homebrew will install the native libraries in
+# /opt/homebrew instead of /usr/local, most likely because they
+# emulate x86_64 compatibility via Rosetta, and wanting to keep the
+# libraries separate. This however means we also need to switch out
+# the paths accordingly when we detect we're on an M1 macos machine.
+ifeq ("$(OS)-$(ARCH)", "Darwin-arm64")
+CPATH := /opt/homebrew/include
+LIBRARY_PATH := /opt/homebrew/lib
+else
+CPATH := /usr/local/include
+LIBRARY_PATH := /usr/local/lib
+endif
+
 CPPFLAGS += -DBINTOPKGLIBEXECDIR="\"$(shell sh tools/rel.sh $(bindir) $(pkglibexecdir))\""
-CFLAGS = $(CPPFLAGS) $(CWARNFLAGS) $(CDEBUGFLAGS) $(COPTFLAGS) -I $(CCANDIR) $(EXTERNAL_INCLUDE_FLAGS) -I . -I/usr/local/include $(SQLITE3_CFLAGS) $(POSTGRES_INCLUDE) $(FEATURES) $(COVFLAGS) $(DEV_CFLAGS) -DSHACHAIN_BITS=48 -DJSMN_PARENT_LINKS $(PIE_CFLAGS) $(COMPAT_CFLAGS) -DBUILD_ELEMENTS=1
+CFLAGS = $(CPPFLAGS) $(CWARNFLAGS) $(CDEBUGFLAGS) $(COPTFLAGS) -I $(CCANDIR) $(EXTERNAL_INCLUDE_FLAGS) -I . -I$(CPATH) $(SQLITE3_CFLAGS) $(POSTGRES_INCLUDE) $(FEATURES) $(COVFLAGS) $(DEV_CFLAGS) -DSHACHAIN_BITS=48 -DJSMN_PARENT_LINKS $(PIE_CFLAGS) $(COMPAT_CFLAGS) -DBUILD_ELEMENTS=1
+
 # If CFLAGS is already set in the environment of make (to whatever value, it
 # does not matter) then it would export it to subprocesses with the above value
 # we set, including CWARNFLAGS which by default contains -Wall -Werror. This
@@ -252,9 +275,9 @@ ifeq ($(STATIC),1)
 # For MacOS, Jacob Rapoport <jacob@rumblemonkey.com> changed this to:
 #  -L/usr/local/lib -Wl,-lgmp -lsqlite3 -lz -Wl,-lm -lpthread -ldl $(COVFLAGS)
 # But that doesn't static link.
-LDLIBS = -L/usr/local/lib -Wl,-dn -lgmp $(SQLITE3_LDLIBS) -lz -Wl,-dy -lm -lpthread -ldl $(COVFLAGS)
+LDLIBS = -L$(CPATH) -Wl,-dn -lgmp $(SQLITE3_LDLIBS) -lz -Wl,-dy -lm -lpthread -ldl $(COVFLAGS)
 else
-LDLIBS = -L/usr/local/lib -lm -lgmp $(SQLITE3_LDLIBS) -lz $(COVFLAGS)
+LDLIBS = -L$(CPATH) -lm -lgmp $(SQLITE3_LDLIBS) -lz $(COVFLAGS)
 endif
 
 # If we have the postgres client library we need to link against it as well
@@ -266,7 +289,7 @@ default: show-flags all-programs all-test-programs doc-all default-targets
 
 ifneq ($(SUPPRESS_GENERATION),1)
 FORCE = FORCE
-FORCE::
+FORCE:
 endif
 
 show-flags: config.vars
@@ -351,13 +374,28 @@ include devtools/Makefile
 include tools/Makefile
 include plugins/Makefile
 include tests/plugins/Makefile
-include contrib/libhsmd_python/Makefile
+
 ifneq ($(FUZZING),0)
 	include tests/fuzz/Makefile
 endif
 ifneq ($(RUST),0)
 	include cln-rpc/Makefile
 	include cln-grpc/Makefile
+
+GRPC_GEN = contrib/pyln-testing/pyln/testing/node_pb2.py \
+	contrib/pyln-testing/pyln/testing/node_pb2_grpc.py \
+	contrib/pyln-testing/pyln/testing/primitives_pb2.py
+
+ALL_TEST_GEN += $(GRPC_GEN)
+
+$(GRPC_GEN): cln-grpc/proto/node.proto cln-grpc/proto/primitives.proto
+	python -m grpc_tools.protoc -I cln-grpc/proto cln-grpc/proto/node.proto --python_out=contrib/pyln-testing/pyln/testing/ --grpc_python_out=contrib/pyln-testing/pyln/testing/ --experimental_allow_proto3_optional
+	python -m grpc_tools.protoc -I cln-grpc/proto cln-grpc/proto/primitives.proto --python_out=contrib/pyln-testing/pyln/testing/ --experimental_allow_proto3_optional
+	# The compiler assumes that the proto files are in the same
+	# directory structure as the generated files will be. Since we
+	# don't do that we need to path the files up.
+	find contrib/pyln-testing/pyln/testing/ -type f -name "*.py" -print0 | xargs -0 sed -i 's/^import \(.*\)_pb2 as .*__pb2/from . import \1_pb2 as \1__pb2/g'
+
 endif
 
 # We make pretty much everything depend on these.
@@ -373,7 +411,8 @@ ALL_NONGEN_SRCFILES := $(ALL_NONGEN_HEADERS) $(ALL_NONGEN_SOURCES)
 BIN_PROGRAMS = \
 	       cli/lightning-cli \
 	       lightningd/lightningd \
-	       tools/lightning-hsmtool
+	       tools/lightning-hsmtool\
+	       tools/reckless
 PKGLIBEXEC_PROGRAMS = \
 	       lightningd/lightning_channeld \
 	       lightningd/lightning_closingd \
@@ -424,7 +463,7 @@ else
 endif
 endif
 
-pytest: $(ALL_PROGRAMS) $(DEFAULT_TARGETS) $(ALL_TEST_PROGRAMS)
+pytest: $(ALL_PROGRAMS) $(DEFAULT_TARGETS) $(ALL_TEST_PROGRAMS) $(ALL_TEST_GEN)
 ifeq ($(PYTEST),)
 	@echo "py.test is required to run the integration tests, please install using 'pip3 install -r requirements.txt', and rerun 'configure'."
 	exit 1
@@ -481,7 +520,7 @@ check-markdown:
 check-spelling:
 	@tools/check-spelling.sh
 
-PYSRC=$(shell git ls-files "*.py" | grep -v /text.py) contrib/pylightning/lightning-pay
+PYSRC=$(shell git ls-files "*.py" | grep -v /text.py)
 
 # Some tests in pyln will need to find lightningd to run, so have a PATH that
 # allows it to find that
@@ -512,7 +551,7 @@ check-cppcheck: .cppcheck-suppress
 	@trap 'rm -f .cppcheck-suppress' 0; git ls-files -- "*.c" "*.h" | grep -vE '^ccan/' | xargs cppcheck  ${CPPCHECK_OPTS}
 
 check-shellcheck:
-	@git ls-files -- "*.sh" | xargs shellcheck
+	@git ls-files -- "*.sh" | xargs shellcheck -f gcc
 
 check-setup_locale:
 	@tools/check-setup_locale.sh
@@ -541,7 +580,18 @@ full-check: check check-source
 #
 # Do not run on your development tree since it will complain if you
 # have a dirty tree.
-check-gen-updated: $(ALL_GEN_HEADERS) $(ALL_GEN_SOURCES) wallet/statements_gettextgen.po $(MANPAGES)
+CHECK_GEN_ALL = \
+	$(CLN_GRPC_GENALL) \
+	$(CLN_RPC_GENALL) \
+	$(MANPAGES) \
+	$(WALLET_DB_QUERIES) \
+	$(PYTHON_GENERATED) \
+	$(ALL_GEN_HEADERS) \
+	$(ALL_GEN_SOURCES) \
+	wallet/statements_gettextgen.po \
+	.msggen.json
+
+check-gen-updated:  $(CHECK_GEN_ALL)
 	@echo "Checking for generated files being changed by make"
 	git diff --exit-code HEAD $?
 
@@ -570,16 +620,28 @@ ALL_PROGRAMS += ccan/ccan/cdump/tools/cdump-enumstr
 # Can't add to ALL_OBJS, as that makes a circular dep.
 ccan/ccan/cdump/tools/cdump-enumstr.o: $(CCAN_HEADERS) Makefile
 
+# Without a working git, you can't generate this file, so assume if it exists
+# it is ok (fixes "sudo make install").
+ifeq ($(VERSION),)
+version_gen.h:
+	echo "ERROR: git is required for generating version information" >&2
+	exit 1
+else
 version_gen.h: $(FORCE)
 	@(echo "#define VERSION \"$(VERSION)\"" && echo "#define BUILD_FEATURES \"$(FEATURES)\"") > $@.new
 	@if cmp $@.new $@ >/dev/null 2>&1; then rm -f $@.new; else mv $@.new $@; $(ECHO) Version updated; fi
+endif
 
 # That forces this rule to be run every time, too.
 header_versions_gen.h: tools/headerversions
 	@tools/headerversions $@
 
+# We make a static library, this way linker can discard unused parts.
+libccan.a: $(CCAN_OBJS)
+	@$(call VERBOSE, "ar $@", $(AR) r $@ $(CCAN_OBJS))
+
 # All binaries require the external libs, ccan and system library versions.
-$(ALL_PROGRAMS) $(ALL_TEST_PROGRAMS) $(ALL_FUZZ_TARGETS): $(EXTERNAL_LIBS) $(CCAN_OBJS)
+$(ALL_PROGRAMS) $(ALL_TEST_PROGRAMS) $(ALL_FUZZ_TARGETS): $(EXTERNAL_LIBS) libccan.a
 
 # Each test program depends on its own object.
 $(ALL_TEST_PROGRAMS) $(ALL_FUZZ_TARGETS): %: %.o
@@ -589,13 +651,13 @@ $(ALL_TEST_PROGRAMS) $(ALL_FUZZ_TARGETS): %: %.o
 # uses some ccan modules internally).  We want to rely on -lwallycore etc.
 # (as per EXTERNAL_LDLIBS) so we filter them out here.
 $(ALL_PROGRAMS) $(ALL_TEST_PROGRAMS):
-	@$(call VERBOSE, "ld $@", $(LINK.o) $(filter-out %.a,$^) $(LOADLIBES) $(EXTERNAL_LDLIBS) $(LDLIBS) -o $@)
+	@$(call VERBOSE, "ld $@", $(LINK.o) $(filter-out %.a,$^) $(LOADLIBES) $(EXTERNAL_LDLIBS) $(LDLIBS) libccan.a -o $@)
 
 # We special case the fuzzing target binaries, as they need to link against libfuzzer,
 # which brings its own main().
 FUZZ_LDFLAGS = -fsanitize=fuzzer
 $(ALL_FUZZ_TARGETS):
-	@$(call VERBOSE, "ld $@", $(LINK.o) $(filter-out %.a,$^) $(LOADLIBES) $(EXTERNAL_LDLIBS) $(LDLIBS) $(FUZZ_LDFLAGS) -o $@)
+	@$(call VERBOSE, "ld $@", $(LINK.o) $(filter-out %.a,$^) $(LOADLIBES) $(EXTERNAL_LDLIBS) $(LDLIBS) libccan.a $(FUZZ_LDFLAGS) -o $@)
 
 
 # Everything depends on the CCAN headers, and Makefile
@@ -635,7 +697,7 @@ obsclean:
 	$(RM) gen_*.h */gen_*.[ch] */*/gen_*.[ch]
 
 clean: obsclean
-	$(RM) $(CCAN_OBJS) $(CDUMP_OBJS) $(ALL_OBJS)
+	$(RM) libccan.a $(CCAN_OBJS) $(CDUMP_OBJS) $(ALL_OBJS)
 	$(RM) $(ALL_GEN_HEADERS) $(ALL_GEN_SOURCES)
 	$(RM) $(ALL_PROGRAMS)
 	$(RM) $(ALL_TEST_PROGRAMS)
@@ -647,6 +709,20 @@ clean: obsclean
 	find . -name '*.nccout' -delete
 	if [ "${RUST}" -eq "1" ]; then cargo clean; fi
 
+
+PYLNS=client proto testing
+# See doc/MAKING-RELEASES.md
+update-pyln-versions: $(PYLNS:%=update-pyln-version-%)
+
+update-pyln-version-%:
+	@if [ -z "$(NEW_VERSION)" ]; then echo "Set NEW_VERSION!" >&2; exit 1; fi
+	cd contrib/pyln-$* && $(MAKE) upgrade-version
+
+pyln-release:  $(PYLNS:%=pyln-release-%)
+
+pyln-release-%:
+	cd contrib/pyln-$* && $(MAKE) prod-release
+
 # These must both be enabled for update-mocks
 ifeq ($(DEVELOPER)$(EXPERIMENTAL_FEATURES),11)
 update-mocks: $(ALL_TEST_PROGRAMS:%=update-mocks/%.c)
@@ -655,7 +731,7 @@ update-mocks:
 	@echo Need DEVELOPER=1 and EXPERIMENTAL_FEATURES=1 to regenerate mocks >&2; exit 1
 endif
 
-$(ALL_TEST_PROGRAMS:%=update-mocks/%.c): $(ALL_GEN_HEADERS) $(EXTERNAL_LIBS) $(CCAN_OBJS) ccan/ccan/cdump/tools/cdump-enumstr config.vars
+$(ALL_TEST_PROGRAMS:%=update-mocks/%.c): $(ALL_GEN_HEADERS) $(EXTERNAL_LIBS) libccan.a ccan/ccan/cdump/tools/cdump-enumstr config.vars
 
 update-mocks/%: %
 	@MAKE=$(MAKE) tools/update-mocks.sh "$*" $(SUPPRESS_OUTPUT)
@@ -777,13 +853,17 @@ installcheck: all-programs
 	installcheck ncc bin-tarball show-flags
 
 # Make a tarball of opt/clightning/, optionally with label for distribution.
+ifneq ($(VERSION),)
 bin-tarball: clightning-$(VERSION)-$(DISTRO).tar.xz
 clightning-$(VERSION)-$(DISTRO).tar.xz: DESTDIR=$(shell pwd)/
 clightning-$(VERSION)-$(DISTRO).tar.xz: prefix=opt/clightning
 clightning-$(VERSION)-$(DISTRO).tar.xz: install
 	trap "rm -rf opt" 0; tar cvfa $@ opt/
+endif
 
 ccan-breakpoint.o: $(CCANDIR)/ccan/breakpoint/breakpoint.c
+	@$(call VERBOSE, "cc $<", $(CC) $(CFLAGS) -c -o $@ $<)
+ccan-base64.o: $(CCANDIR)/ccan/base64/base64.c
 	@$(call VERBOSE, "cc $<", $(CC) $(CFLAGS) -c -o $@ $<)
 ccan-tal.o: $(CCANDIR)/ccan/tal/tal.c
 	@$(call VERBOSE, "cc $<", $(CC) $(CFLAGS) -c -o $@ $<)
@@ -884,4 +964,8 @@ ccan-json_escape.o: $(CCANDIR)/ccan/json_escape/json_escape.c
 ccan-json_out.o: $(CCANDIR)/ccan/json_out/json_out.c
 	@$(call VERBOSE, "cc $<", $(CC) $(CFLAGS) -c -o $@ $<)
 ccan-closefrom.o: $(CCANDIR)/ccan/closefrom/closefrom.c
+	@$(call VERBOSE, "cc $<", $(CC) $(CFLAGS) -c -o $@ $<)
+ccan-rune-rune.o: $(CCANDIR)/ccan/rune/rune.c
+	@$(call VERBOSE, "cc $<", $(CC) $(CFLAGS) -c -o $@ $<)
+ccan-rune-coding.o: $(CCANDIR)/ccan/rune/coding.c
 	@$(call VERBOSE, "cc $<", $(CC) $(CFLAGS) -c -o $@ $<)

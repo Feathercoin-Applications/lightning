@@ -1,6 +1,6 @@
 #include "config.h"
 #include <common/bolt11.h>
-#include <common/json_helpers.h>
+#include <common/json_parse.h>
 #include <common/type_to_string.h>
 #include <gossipd/gossipd_wiregen.h>
 #include <lightningd/channel.h>
@@ -61,7 +61,7 @@ routehint_candidates(const tal_t *ctx,
 		struct amount_msat capacity;
 		const char *err;
 		struct routehint_candidate candidate;
-		struct amount_msat fee_base;
+		struct amount_msat fee_base, htlc_max;
 		struct route_info *r;
 		struct peer *peer;
 		bool is_public;
@@ -74,6 +74,7 @@ routehint_candidates(const tal_t *ctx,
 				",fee_base_msat:%"
 				",fee_proportional_millionths:%"
 				",cltv_expiry_delta:%"
+				",htlc_max_msat:%"
 				",incoming_capacity_msat:%"
 				"}",
 				JSON_SCAN(json_to_node_id, &r->pubkey),
@@ -83,6 +84,7 @@ routehint_candidates(const tal_t *ctx,
 				JSON_SCAN(json_to_u32,
 					  &r->fee_proportional_millionths),
 				JSON_SCAN(json_to_u16, &r->cltv_expiry_delta),
+				JSON_SCAN(json_to_msat, &htlc_max),
 				JSON_SCAN(json_to_msat, &capacity));
 
 		if (err) {
@@ -97,14 +99,34 @@ routehint_candidates(const tal_t *ctx,
 		if (!peer) {
 			log_debug(ld->log, "%s: unknown peer",
 				  type_to_string(tmpctx,
-						 struct short_channel_id,
-						 &r->short_channel_id));
+						 struct node_id,
+						 &r->pubkey));
 			continue;
 		}
 
-		/* Does it have a channel in state CHANNELD_NORMAL */
-		candidate.c = peer_normal_channel(peer);
+		/* Check channel is in CHANNELD_NORMAL */
+		candidate.c = find_channel_by_scid(peer, &r->short_channel_id);
+
+		/* Try seeing if we should be using a remote alias
+		 * instead. The `listpeers` result may have returned
+		 * the REMOTE alias, because it is the only scid we
+		 * have, and it is mandatory once the channel is in
+		 * CHANNELD_NORMAL. */
+		if (!candidate.c)
+			candidate.c = find_channel_by_alias(peer, &r->short_channel_id, REMOTE);
+
 		if (!candidate.c) {
+			log_debug(ld->log, "%s: channel not found in peer %s",
+				  type_to_string(tmpctx,
+						 struct short_channel_id,
+						 &r->short_channel_id),
+				  type_to_string(tmpctx,
+						 struct node_id,
+						 &r->pubkey));
+			continue;
+		}
+
+		if (candidate.c->state != CHANNELD_NORMAL) {
 			log_debug(ld->log, "%s: abnormal channel",
 				  type_to_string(tmpctx,
 						 struct short_channel_id,
@@ -112,7 +134,16 @@ routehint_candidates(const tal_t *ctx,
 			continue;
 		}
 
+		/* FIXME: we don't actually check htlc_minimum_msat! */
+
+		/* If they set an htlc_maximum_msat, consider that the
+		 * capacity ceiling.  We *could* do multiple HTLCs,
+		 * but presumably that would defeat the spirit of the
+		 * limit anyway */
+		/* FIXME: Present max capacity of multiple channels? */
 		candidate.capacity = channel_amount_receivable(candidate.c);
+		if (amount_msat_greater(candidate.capacity, htlc_max))
+			candidate.capacity = htlc_max;
 
 		/* Now we can tell if it's public.  If so (even if it's otherwise
 		 * unusable), we *don't* expose private channels! */
@@ -140,7 +171,10 @@ routehint_candidates(const tal_t *ctx,
 		/* Consider only hints they gave */
 		if (hints) {
 			log_debug(ld->log, "We have hints!");
-			if (!scid_in_arr(hints, &r->short_channel_id)) {
+			/* Allow specification by alias, too */
+			if (!scid_in_arr(hints, &r->short_channel_id)
+			    && (!candidate.c->alias[REMOTE]
+				|| !scid_in_arr(hints, candidate.c->alias[REMOTE]))) {
 				log_debug(ld->log, "scid %s not in hints",
 					  type_to_string(tmpctx,
 							 struct short_channel_id,
@@ -171,6 +205,22 @@ routehint_candidates(const tal_t *ctx,
 					     candidate.capacity))
 				fatal("Overflow summing offline capacity!");
 			continue;
+		}
+
+		/* BOLT-channel-type #2:
+		 *   - if `channel_type` has `option_scid_alias` set:
+		 *       - MUST NOT use the real `short_channel_id` in
+		 *         BOLT 11 `r` fields.
+		 */
+		/* FIXME: We don't remember the type explicitly, so
+		 * we just assume all private channels negotiated since
+		 * we had alias support want this. */
+
+		/* Note explicit flag test here: if we're told to expose all
+		 * private channels, then "is_public" is forced true */
+		if (!(candidate.c->channel_flags & CHANNEL_FLAGS_ANNOUNCE_CHANNEL)
+		    && candidate.c->alias[REMOTE]) {
+			r->short_channel_id = *candidate.c->alias[REMOTE];
 		}
 
 		/* OK, finish it and append to one of the arrays. */

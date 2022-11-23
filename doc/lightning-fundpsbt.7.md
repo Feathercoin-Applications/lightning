@@ -33,10 +33,9 @@ added any inputs.
 *minconf* specifies the minimum number of confirmations that used
 outputs should have. Default is 1.
 
-*reserve* is either boolean or a number: if *true* or a non-zero
-number then *reserveinputs* is called (successfully, with
-*exclusive* true) on the returned PSBT for this number of blocks (or
-72 blocks if *reserve* is simply *true*).
+If *reserve* if not zero, then *reserveinputs* is called (successfully, with
+*exclusive* true) on the returned PSBT for this number of blocks (default
+72 blocks if unspecified).
 
 *locktime* is an optional locktime: if not set, it is set to a recent
 block height.
@@ -73,17 +72,18 @@ RETURN VALUE
 
 [comment]: # (GENERATE-FROM-SCHEMA-START)
 On success, an object is returned, containing:
+
 - **psbt** (string): Unsigned PSBT which fulfills the parameters given
-- **feerate_per_kw** (u32): The feerate used to create the PSBT, in satoshis-per-kiloweight
-- **estimated_final_weight** (u32): The estimated weight of the transaction once fully signed
-- **excess_msat** (msat): The amount above *satoshi* which is available.  This could be zero, or dust; it will be zero if *change_outnum* is also returned
-- **change_outnum** (u32, optional): The 0-based output number where change was placed (only if parameter *excess_as_change* was true and there was sufficient funds)
+- **feerate\_per\_kw** (u32): The feerate used to create the PSBT, in satoshis-per-kiloweight
+- **estimated\_final\_weight** (u32): The estimated weight of the transaction once fully signed
+- **excess\_msat** (msat): The amount above *satoshi* which is available.  This could be zero, or dust; it will be zero if *change_outnum* is also returned
+- **change\_outnum** (u32, optional): The 0-based output number where change was placed (only if parameter *excess_as_change* was true and there was sufficient funds)
 - **reservations** (array of objects, optional): If *reserve* was true or a non-zero number, just as per lightning-reserveinputs(7):
   - **txid** (txid): The txid of the transaction
   - **vout** (u32): The 0-based output number
-  - **was_reserved** (boolean): Whether this output was previously reserved (always *false*)
+  - **was\_reserved** (boolean): Whether this output was previously reserved (always *false*)
   - **reserved** (boolean): Whether this output is now reserved (always *true*)
-  - **reserved_to_block** (u32): The blockheight the reservation will expire
+  - **reserved\_to\_block** (u32): The blockheight the reservation will expire
 
 [comment]: # (GENERATE-FROM-SCHEMA-END)
 
@@ -115,4 +115,4 @@ RESOURCES
 
 Main web site: <https://github.com/ElementsProject/lightning>
 
-[comment]: # ( SHA256STAMP:635cc321d158bcdb3ca24f13c9955cc9b867e34247c1cf3d91edbbe21eb06a48)
+[comment]: # ( SHA256STAMP:0f290582f49c6103258b7f781a9e7fa4075ec6c05335a459a91da0b6fd58c68d)

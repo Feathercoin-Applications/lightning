@@ -18,6 +18,16 @@ bool amount_sat_to_msat(struct amount_msat *msat,
 	return true;
 }
 
+bool amount_msat_to_sat(struct amount_sat *sat,
+			struct amount_msat msat)
+{
+	if (msat.millisatoshis % MSAT_PER_SAT)
+		return false;
+	sat->satoshis = msat.millisatoshis / MSAT_PER_SAT;
+	return true;
+}
+
+
 /* You can always truncate millisatoshis->satoshis. */
 struct amount_sat amount_msat_to_sat_round_down(struct amount_msat msat)
 {
@@ -495,6 +505,22 @@ struct amount_sat amount_sat_div(struct amount_sat sat, u64 div)
 {
 	sat.satoshis /= div;
 	return sat;
+}
+
+bool amount_sat_mul(struct amount_sat *res, struct amount_sat sat, u64 mul)
+{
+	if (	mul_overflows_u64(sat.satoshis, mul))
+		return false;
+	res->satoshis = sat.satoshis * mul;
+	return true;
+}
+
+bool amount_msat_mul(struct amount_msat *res, struct amount_msat msat, u64 mul)
+{
+	if (	mul_overflows_u64(msat.millisatoshis, mul))
+		return false;
+	res->millisatoshis = msat.millisatoshis * mul;
+	return true;
 }
 
 bool amount_msat_fee(struct amount_msat *fee,

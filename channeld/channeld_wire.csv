@@ -35,6 +35,8 @@ msgdata,channeld_init,old_remote_per_commit,pubkey,
 msgdata,channeld_init,opener,enum side,
 msgdata,channeld_init,fee_base,u32,
 msgdata,channeld_init,fee_proportional,u32,
+msgdata,channeld_init,htlc_minimum_msat,amount_msat,
+msgdata,channeld_init,htlc_maximum_msat,amount_msat,
 msgdata,channeld_init,local_msatoshi,amount_msat,
 msgdata,channeld_init,our_basepoints,basepoints,
 msgdata,channeld_init,our_funding_pubkey,pubkey,
@@ -51,8 +53,8 @@ msgdata,channeld_init,revocations_received,u64,
 msgdata,channeld_init,next_htlc_id,u64,
 msgdata,channeld_init,num_existing_htlcs,u16,
 msgdata,channeld_init,htlcs,existing_htlc,num_existing_htlcs
-msgdata,channeld_init,local_funding_locked,bool,
-msgdata,channeld_init,remote_funding_locked,bool,
+msgdata,channeld_init,local_channel_ready,bool,
+msgdata,channeld_init,remote_channel_ready,bool,
 msgdata,channeld_init,funding_short_id,short_channel_id,
 msgdata,channeld_init,reestablish,bool,
 msgdata,channeld_init,send_shutdown,bool,
@@ -74,18 +76,19 @@ msgdata,channeld_init,remote_ann_node_sig,?secp256k1_ecdsa_signature,
 msgdata,channeld_init,remote_ann_bitcoin_sig,?secp256k1_ecdsa_signature,
 msgdata,channeld_init,desired_type,channel_type,
 msgdata,channeld_init,dev_fast_gossip,bool,
-msgdata,channeld_init,dev_fail_process_onionpacket,bool,
 msgdata,channeld_init,dev_disable_commit,?u32,
 msgdata,channeld_init,num_penalty_bases,u32,
 msgdata,channeld_init,pbases,penalty_base,num_penalty_bases
-msgdata,channeld_init,reestablish_only_len,u16,
-msgdata,channeld_init,reestablish_only,u8,reestablish_only_len
+msgdata,channeld_init,reestablish_only,bool,
 msgdata,channeld_init,channel_update_len,u16,
 msgdata,channeld_init,channel_update,u8,channel_update_len
 
 # master->channeld funding hit new depth(funding locked if >= lock depth)
+# alias != NULL if zeroconf and short_channel_id == NULL
+# short_channel_id != NULL once we have 3+ confirmations
 msgtype,channeld_funding_depth,1002
 msgdata,channeld_funding_depth,short_channel_id,?short_channel_id,
+msgdata,channeld_funding_depth,alias_local,?short_channel_id,
 msgdata,channeld_funding_depth,depth,u32,
 
 # Tell channel to offer this htlc
@@ -113,9 +116,10 @@ msgdata,channeld_fulfill_htlc,fulfilled_htlc,fulfilled_htlc,
 msgtype,channeld_fail_htlc,1006
 msgdata,channeld_fail_htlc,failed_htlc,failed_htlc,
 
-# When we receive funding_locked.
-msgtype,channeld_got_funding_locked,1019
-msgdata,channeld_got_funding_locked,next_per_commit_point,pubkey,
+# When we receive channel_ready.
+msgtype,channeld_got_channel_ready,1019
+msgdata,channeld_got_channel_ready,next_per_commit_point,pubkey,
+msgdata,channeld_got_channel_ready,alias,?short_channel_id,
 
 #include <common/penalty_base.h>
 
@@ -215,10 +219,12 @@ msgtype,channeld_fail_fallen_behind,1028
 # This is NULL if option_static_remotekey.
 msgdata,channeld_fail_fallen_behind,remote_per_commitment_point,?pubkey,
 
-# Handle a channel specific feerate base ppm configuration
-msgtype,channeld_specific_feerates,1029
-msgdata,channeld_specific_feerates,feerate_base,u32,
-msgdata,channeld_specific_feerates,feerate_ppm,u32,
+# Handle a channel-specific configuration change
+msgtype,channeld_config_channel,1029
+msgdata,channeld_config_channel,feerate_base,?u32,
+msgdata,channeld_config_channel,feerate_ppm,?u32,
+msgdata,channeld_config_channel,htlc_minimum,?amount_msat,
+msgdata,channeld_config_channel,htlc_maximum,?amount_msat,
 
 # When we receive announcement_signatures for channel announce
 msgtype,channeld_got_announcement,1017
@@ -249,6 +255,7 @@ msgdata,channeld_local_channel_update,htlc_minimum_msat,amount_msat,
 msgdata,channeld_local_channel_update,fee_base_msat,u32,
 msgdata,channeld_local_channel_update,fee_proportional_millionths,u32,
 msgdata,channeld_local_channel_update,htlc_maximum_msat,amount_msat,
+msgdata,channeld_local_channel_update,public,bool,
 
 # Channeld: tell gossipd about our channel_announcement
 msgtype,channeld_local_channel_announcement,1014

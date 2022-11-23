@@ -13,7 +13,6 @@
         "additionalProperties": true,
         "required": [
           "label",
-          "description",
           "payment_hash",
           "status",
           "expires_at"
@@ -28,7 +27,7 @@
             "description": "description used in the invoice"
           },
           "payment_hash": {
-            "type": "hex",
+            "type": "hash",
             "description": "the hash of the *payment_preimage* which will prove payment",
             "maxLength": 64,
             "minLength": 64
@@ -67,9 +66,9 @@
             "maxLength": 64,
             "minLength": 64
           },
-          "payer_note": {
+          "invreq_payer_note": {
             "type": "string",
-            "description": "the optional *payer_note* from invoice_request which created this invoice (**experimental-offers** only)."
+            "description": "the optional *invreq_payer_note* from invoice_request which created this invoice (**experimental-offers** only)."
           }
         },
         "allOf": [
@@ -102,7 +101,7 @@
                 "bolt11": {},
                 "bolt12": {},
                 "local_offer_id": {},
-                "payer_note": {},
+                "invreq_payer_note": {},
                 "expires_at": {},
                 "pay_index": {
                   "type": "u64",
@@ -120,7 +119,7 @@
                   "description": "UNIX timestamp of when it was paid"
                 },
                 "payment_preimage": {
-                  "type": "hex",
+                  "type": "secret",
                   "description": "proof of payment",
                   "maxLength": 64,
                   "minLength": 64
@@ -139,7 +138,7 @@
                 "bolt11": {},
                 "bolt12": {},
                 "local_offer_id": {},
-                "payer_note": {},
+                "invreq_payer_note": {},
                 "expires_at": {}
               }
             }

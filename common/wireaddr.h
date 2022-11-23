@@ -12,24 +12,13 @@ struct sockaddr_in6;
 struct sockaddr_in;
 struct sockaddr_un;
 
-/* BOLT #1:
- *
- * The default TCP port is 9735. This corresponds to hexadecimal
- * `0x2607`: the Unicode code point for LIGHTNING.
- */
-#define DEFAULT_PORT 9735
-
-
 /* BOLT #7:
  *
  * The following `address descriptor` types are defined:
  *
  *   * `1`: ipv4; data = `[4:ipv4_addr][2:port]` (length 6)
  *   * `2`: ipv6; data = `[16:ipv6_addr][2:port]` (length 18)
- *   * `3`: Tor v2 onion service; data = `[10:onion_addr][2:port]` (length 12)
- *       * version 2 onion service addresses; Encodes an 80-bit, truncated `SHA-1` hash
- *         of a 1024-bit `RSA` public key for the onion service (a.k.a. Tor
- *	   hidden service).
+ *   * `3`: Deprecated (length 12). Used to contain Tor v2 onion services.
  *   * `4`: Tor v3 onion service; data = `[35:onion_addr][2:port]` (length 37)
  *       * version 3 ([prop224](https://gitweb.torproject.org/torspec.git/tree/proposals/224-rend-spec-ng.txt))
  *         onion service addresses; Encodes:
@@ -93,7 +82,6 @@ bool parse_wireaddr(const char *arg, struct wireaddr *addr, u16 port,
 
 char *fmt_wireaddr(const tal_t *ctx, const struct wireaddr *a);
 char *fmt_wireaddr_without_port(const tal_t *ctx, const struct wireaddr *a);
-char *printwire_wireaddr(const tal_t *ctx, const struct wireaddr *a);
 
 /* If no_dns is non-NULL, we will set it to true and return NULL if
  * we wanted to do a DNS lookup. */
@@ -170,7 +158,7 @@ bool is_dnsaddr(const char *arg);
 
 bool parse_wireaddr_internal(const char *arg, struct wireaddr_internal *addr,
 			     u16 port, bool wildcard_ok, bool dns_ok,
-			     bool unresolved_ok, bool allow_deprecated,
+			     bool unresolved_ok,
 			     const char **err_msg);
 
 void towire_wireaddr_internal(u8 **pptr,
@@ -200,5 +188,8 @@ struct wireaddr *fromwire_wireaddr_array(const tal_t *ctx, const u8 *ser);
 
 int wireaddr_cmp_type(const struct wireaddr *a,
 		      const struct wireaddr *b, void *unused);
+
+bool wireaddr_arr_contains(const struct wireaddr *was,
+			   const struct wireaddr *wa);
 
 #endif /* LIGHTNING_COMMON_WIREADDR_H */

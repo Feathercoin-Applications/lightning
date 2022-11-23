@@ -4,8 +4,8 @@
 #include <ccan/array_size/array_size.h>
 #include <ccan/json_out/json_out.h>
 #include <ccan/tal/str/str.h>
+#include <common/json_param.h>
 #include <common/json_stream.h>
-#include <common/json_tok.h>
 #include <common/psbt_open.h>
 #include <common/pseudorand.h>
 #include <common/type_to_string.h>
@@ -288,7 +288,7 @@ mw_forward_error(struct command *cmd UNUSED,
 }
 /* Use this instead of command_fail.  */
 static struct command_result *
-mw_fail(struct multiwithdraw_command *mw, errcode_t code,
+mw_fail(struct multiwithdraw_command *mw, enum jsonrpc_errcode code,
 	const char *fmt, ...)
 {
 	va_list ap;
@@ -303,7 +303,7 @@ mw_fail(struct multiwithdraw_command *mw, errcode_t code,
 
 	js = new_json_stream(tmpctx, mw->cmd, NULL);
 	json_object_start(js, NULL);
-	json_add_errcode(js, "code", code);
+	json_add_jsonrpc_errcode(js, "code", code);
 	json_add_string(js, "message", message);
 	json_object_end(js);
 
@@ -356,7 +356,7 @@ static struct command_result *start_mw(struct multiwithdraw_command *mw)
 					    &mw_forward_error,
 					    mw);
 		json_add_bool(req->js, "reservedok", false);
-		json_add_jsonstr(req->js, "utxos", mw->utxos);
+		json_add_jsonstr(req->js, "utxos", mw->utxos, strlen(mw->utxos));
 	} else {
 		plugin_log(mw->cmd->plugin, LOG_DBG,
 			   "multiwithdraw %"PRIu64": fundpsbt.",
@@ -369,7 +369,6 @@ static struct command_result *start_mw(struct multiwithdraw_command *mw)
 					    mw);
 		json_add_u32(req->js, "minconf", *mw->minconf);
 	}
-	json_add_bool(req->js, "reserve", true);
 	if (mw->has_all)
 		json_add_string(req->js, "satoshi", "all");
 	else {
@@ -411,6 +410,7 @@ mw_after_fundpsbt(struct command *cmd,
 	u32 feerate_per_kw;
 	u32 estimated_final_weight;
 	struct amount_sat excess_sat;
+	struct amount_msat excess_msat;
 	bool ok = true;
 
 	/* Extract results.  */
@@ -431,7 +431,8 @@ mw_after_fundpsbt(struct command *cmd,
 
 	field = ok ? json_get_member(buf, result, "excess_msat") : NULL;
 	ok = ok && field;
-	ok = ok && json_to_sat(buf, field, &excess_sat);
+	ok = ok && json_to_msat(buf, field, &excess_msat);
+	ok = ok && amount_msat_to_sat(&excess_sat, excess_msat);
 
 	if (!ok)
 		plugin_err(mw->cmd->plugin,

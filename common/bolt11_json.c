@@ -6,7 +6,6 @@
 #include <common/bech32.h>
 #include <common/bolt11.h>
 #include <common/bolt11_json.h>
-#include <common/json_helpers.h>
 #include <common/json_stream.h>
 
 static void json_add_fallback(struct json_stream *response,
@@ -66,6 +65,8 @@ void json_add_bolt11(struct json_stream *response,
                                 b11->payment_secret);
 	if (b11->features)
 		json_add_hex_talarr(response, "features", b11->features);
+	if (b11->metadata)
+		json_add_hex_talarr(response, "payment_metadata", b11->metadata);
         if (tal_count(b11->fallbacks)) {
 		json_array_start(response, "fallbacks");
 		for (size_t i = 0; i < tal_count(b11->fallbacks); i++)

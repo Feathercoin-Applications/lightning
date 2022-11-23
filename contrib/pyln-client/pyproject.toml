@@ -1,9 +1,10 @@
 [tool.poetry]
 name = "pyln-client"
-version = "0.10.2"
-description = "Client library and plugin library for c-lightning"
+version = "22.11rc1"
+description = "Client library and plugin library for Core Lightning"
 authors = ["Christian Decker <decker.christian@gmail.com>"]
 license = "BSD-MIT"
+readme = "README.md"
 
 packages = [
   { include = "pyln/client" },
@@ -11,11 +12,13 @@ packages = [
 
 [tool.poetry.dependencies]
 python = "^3.7"
-pyln-proto = { path = "../pyln-proto" }
-pyln-bolt7 = { path = "../pyln-spec/bolt7" }
+pyln-proto = ">=0.12"
+pyln-bolt7 = ">=1.0"
 
 [tool.poetry.dev-dependencies]
 pytest = "^7.0.1"
+pyln-bolt7 = { path = "../pyln-spec/bolt7", develop = true }
+pyln-proto = { path = "../pyln-proto", develop = true}
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]

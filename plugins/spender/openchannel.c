@@ -46,7 +46,7 @@ find_dest_by_channel_id(struct channel_id *cid)
  * the PSBT input/outputs in such a way that we can Do The
  * Right Thing for each of our peers.
  *
- * c-lightning will make sure that our peer isn't removing/adding
+ * Core Lightning will make sure that our peer isn't removing/adding
  * any updates that it's not allowed to (i.e. ours or a different
  * node's that we're pretending are 'ours').
  *
@@ -76,7 +76,7 @@ static bool update_parent_psbt(const tal_t *ctx,
 	tal_wally_start();
 	if (wally_psbt_clone_alloc(*parent_psbt, 0, &clone) != WALLY_OK)
 		abort();
-	tal_wally_end(tal_steal(ctx, clone));
+	tal_wally_end_onto(ctx, clone, struct wally_psbt);
 
 	/* This makes it such that we can reparent/steal added
 	 * inputs/outputs without impacting the 'original'. We
@@ -261,7 +261,7 @@ static bool update_node_psbt(const tal_t *ctx,
 	/* Only failure is alloc */
 	if (wally_psbt_clone_alloc(parent_psbt, 0, &clone) != WALLY_OK)
 		abort();
-	tal_wally_end(tal_steal(ctx, clone));
+	tal_wally_end_onto(ctx, clone, struct wally_psbt);
 
 	/* For every peer's input/output, flip the serial id
 	 * on the clone. They should all be present. */
@@ -346,7 +346,9 @@ openchannel_finished(struct multifundchannel_command *mfc)
 			json_add_node_id(out, "id", &dest->id);
 			json_add_string(out, "method", "openchannel_signed");
 			if (dest->error_data)
-				json_add_jsonstr(out, "data", dest->error_data);
+				json_add_jsonstr(out, "data",
+						 dest->error_data,
+						 strlen(dest->error_data));
 			json_object_end(out);
 
 			return mfc_finished(mfc, out);
@@ -619,10 +621,9 @@ funding_transaction_established(struct multifundchannel_command *mfc)
 
 	/* If all we've got is v2 destinations, we're just waiting
 	 * for all of our peers to send us their sigs.
-	 * That callback triggers separately, so we just return
-	 * a 'still pending' here */
+	 * Let's check if we've gotten them yet */
 	if (dest_count(mfc, FUND_CHANNEL) == 0)
-		return command_still_pending(mfc->cmd);
+		return check_sigs_ready(mfc);
 
 	/* For any v1 destination, we need to update the destination
 	 * outnum with the correct outnum on the now-known
@@ -958,7 +959,7 @@ openchannel_init_ok(struct command *cmd,
 	 * logic in `perform_openchannel_update` the same. */
 	tal_wally_start();
 	wally_psbt_clone_alloc(dest->updated_psbt, 0, &dest->psbt);
-	tal_wally_end(tal_steal(mfc, dest->updated_psbt));
+	tal_wally_end_onto(mfc, dest->updated_psbt, struct wally_psbt);
 	return openchannel_init_done(dest);
 }
 
@@ -998,7 +999,7 @@ openchannel_init_dest(struct multifundchannel_destination *dest)
 	/* Copy the original parent down */
 	tal_wally_start();
 	wally_psbt_clone_alloc(mfc->psbt, 0, &dest->psbt);
-	tal_wally_end(tal_steal(mfc, dest->psbt));
+	tal_wally_end_onto(mfc, dest->psbt, struct wally_psbt);
 
 	json_add_psbt(req->js, "initialpsbt", dest->psbt);
 	if (mfc->cmtmt_feerate_str)

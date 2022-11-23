@@ -27,17 +27,11 @@ bool blinding_next_pubkey(const struct pubkey *pk UNNEEDED,
 /* Generated stub for daemon_conn_send */
 void daemon_conn_send(struct daemon_conn *dc UNNEEDED, const u8 *msg UNNEEDED)
 { fprintf(stderr, "daemon_conn_send called!\n"); abort(); }
-/* Generated stub for ecdh */
-void ecdh(const struct pubkey *point UNNEEDED, struct secret *ss UNNEEDED)
-{ fprintf(stderr, "ecdh called!\n"); abort(); }
 /* Generated stub for find_peer */
 struct peer *find_peer(struct daemon *daemon UNNEEDED, const struct node_id *id UNNEEDED)
 { fprintf(stderr, "find_peer called!\n"); abort(); }
-/* Generated stub for force_node_announce_rexmit */
-void force_node_announce_rexmit(struct routing_state *rstate UNNEEDED, struct node *node UNNEEDED)
-{ fprintf(stderr, "force_node_announce_rexmit called!\n"); abort(); }
 /* Generated stub for fromwire_gossipd_local_channel_update */
-bool fromwire_gossipd_local_channel_update(const void *p UNNEEDED, struct node_id *id UNNEEDED, struct short_channel_id *short_channel_id UNNEEDED, bool *disable UNNEEDED, u16 *cltv_expiry_delta UNNEEDED, struct amount_msat *htlc_minimum_msat UNNEEDED, u32 *fee_base_msat UNNEEDED, u32 *fee_proportional_millionths UNNEEDED, struct amount_msat *htlc_maximum_msat UNNEEDED)
+bool fromwire_gossipd_local_channel_update(const void *p UNNEEDED, struct node_id *id UNNEEDED, struct short_channel_id *short_channel_id UNNEEDED, bool *disable UNNEEDED, u16 *cltv_expiry_delta UNNEEDED, struct amount_msat *htlc_minimum_msat UNNEEDED, u32 *fee_base_msat UNNEEDED, u32 *fee_proportional_millionths UNNEEDED, struct amount_msat *htlc_maximum_msat UNNEEDED, bool *public UNNEEDED)
 { fprintf(stderr, "fromwire_gossipd_local_channel_update called!\n"); abort(); }
 /* Generated stub for fromwire_gossipd_used_local_channel_update */
 bool fromwire_gossipd_used_local_channel_update(const void *p UNNEEDED, struct short_channel_id *scid UNNEEDED)
@@ -65,28 +59,9 @@ u8 *handle_channel_update(struct routing_state *rstate UNNEEDED, const u8 *updat
 u8 *handle_node_announcement(struct routing_state *rstate UNNEEDED, const u8 *node UNNEEDED,
 			     struct peer *peer UNNEEDED, bool *was_unknown UNNEEDED)
 { fprintf(stderr, "handle_node_announcement called!\n"); abort(); }
-/* Generated stub for json_add_member */
-void json_add_member(struct json_stream *js UNNEEDED,
-		     const char *fieldname UNNEEDED,
-		     bool quote UNNEEDED,
-		     const char *fmt UNNEEDED, ...)
-{ fprintf(stderr, "json_add_member called!\n"); abort(); }
-/* Generated stub for json_member_direct */
-char *json_member_direct(struct json_stream *js UNNEEDED,
-			 const char *fieldname UNNEEDED, size_t extra UNNEEDED)
-{ fprintf(stderr, "json_member_direct called!\n"); abort(); }
-/* Generated stub for json_object_end */
-void json_object_end(struct json_stream *js UNNEEDED)
-{ fprintf(stderr, "json_object_end called!\n"); abort(); }
-/* Generated stub for json_object_start */
-void json_object_start(struct json_stream *ks UNNEEDED, const char *fieldname UNNEEDED)
-{ fprintf(stderr, "json_object_start called!\n"); abort(); }
 /* Generated stub for master_badmsg */
 void master_badmsg(u32 type_expected UNNEEDED, const u8 *msg)
 { fprintf(stderr, "master_badmsg called!\n"); abort(); }
-/* Generated stub for new_onionreply */
-struct onionreply *new_onionreply(const tal_t *ctx UNNEEDED, const u8 *contents TAKES UNNEEDED)
-{ fprintf(stderr, "new_onionreply called!\n"); abort(); }
 /* Generated stub for new_reltimer_ */
 struct oneshot *new_reltimer_(struct timers *timers UNNEEDED,
 			      const tal_t *ctx UNNEEDED,

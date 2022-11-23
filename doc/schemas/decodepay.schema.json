@@ -70,6 +70,10 @@
       "type": "hex",
       "description": "the features bitmap for this invoice"
     },
+    "payment_metadata": {
+      "type": "hex",
+      "description": "the payment_metadata to put in the payment"
+    },
     "fallbacks": {
       "type": "array",
       "description": "onchain addresses",
@@ -128,7 +132,7 @@
               "description": "a channel to the next peer"
             },
             "fee_base_msat": {
-              "type": "u32",
+              "type": "msat",
               "description": "the base fee for payments"
             },
             "fee_proportional_millionths": {

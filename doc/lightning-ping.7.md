@@ -37,6 +37,7 @@ RETURN VALUE
 
 [comment]: # (GENERATE-FROM-SCHEMA-START)
 On success, an object is returned, containing:
+
 - **totlen** (u16): the answer length of the reply message (including header: 0 means no reply expected)
 
 [comment]: # (GENERATE-FROM-SCHEMA-END)
@@ -69,4 +70,4 @@ RESOURCES
 ---------
 
 Main web site: <https://github.com/ElementsProject/lightning>
-[comment]: # ( SHA256STAMP:a78a1d58cfe1fbf654ee58aad20ffcaa075f63bd8774c64be5ec28857e95ae3b)
+[comment]: # ( SHA256STAMP:f33aa4d93ca623ff7cd5e4062e0533f617b00372797f8ee0d2498479d2fe08a9)

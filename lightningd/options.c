@@ -12,9 +12,7 @@
 #include <common/features.h>
 #include <common/hsm_encryption.h>
 #include <common/json_command.h>
-#include <common/json_helpers.h>
-#include <common/json_tok.h>
-#include <common/param.h>
+#include <common/json_param.h>
 #include <common/type_to_string.h>
 #include <common/version.h>
 #include <common/wireaddr.h>
@@ -173,11 +171,10 @@ static char *fmt_force_feerates(const tal_t *ctx, const u32 *force_feerates)
 	return ret;
 }
 
-#if EXPERIMENTAL_FEATURES
 static char *opt_set_accept_extra_tlv_types(const char *arg,
-					     struct lightningd *ld)
+					    struct lightningd *ld)
 {
-	char *endp, **elements = tal_strsplit(NULL, arg, ",", STR_NO_EMPTY);;
+	char *endp, **elements = tal_strsplit(NULL, arg, ",", STR_NO_EMPTY);
 	unsigned long long l;
 	u64 u;
 	for (int i = 0; elements[i] != NULL; i++) {
@@ -195,9 +192,7 @@ static char *opt_set_accept_extra_tlv_types(const char *arg,
 	tal_free(elements);
 	return NULL;
 }
-#endif
 
-#if EXPERIMENTAL_FEATURES /* BOLT7 DNS RFC #911 */
 /* Returns the number of wireaddr types already announced */
 static size_t num_announced_types(enum wire_addr_type type, struct lightningd *ld)
 {
@@ -212,7 +207,6 @@ static size_t num_announced_types(enum wire_addr_type type, struct lightningd *l
 	}
 	return num;
 }
-#endif
 
 static char *opt_add_addr_withtype(const char *arg,
 				   struct lightningd *ld,
@@ -228,6 +222,8 @@ static char *opt_add_addr_withtype(const char *arg,
 	assert(arg != NULL);
 	dns_ok = !ld->always_use_proxy && ld->config.use_dns;
 
+	/* Will be overridden in next call iff has port */
+	port = 0;
 	if (!separate_address_and_port(tmpctx, arg, &address, &port))
 		return tal_fmt(NULL, "Unable to parse address:port '%s'", arg);
 
@@ -237,7 +233,7 @@ static char *opt_add_addr_withtype(const char *arg,
 	    || ala != ADDR_ANNOUNCE) {
 		if (!parse_wireaddr_internal(arg, &wi, ld->portnum,
 					     wildcard_ok, dns_ok, false,
-					     deprecated_apis, &err_msg)) {
+					     &err_msg)) {
 			return tal_fmt(NULL, "Unable to parse address '%s': %s", arg, err_msg);
 		}
 
@@ -257,7 +253,6 @@ static char *opt_add_addr_withtype(const char *arg,
 		tal_arr_expand(&ld->proposed_wireaddr, wi);
 	}
 
-#if EXPERIMENTAL_FEATURES /* BOLT7 DNS RFC #911 */
 	/* Add ADDR_TYPE_DNS to announce DNS hostnames */
 	if (is_dnsaddr(address) && ala & ADDR_ANNOUNCE) {
 		/* BOLT-hostnames #7:
@@ -274,12 +269,14 @@ static char *opt_add_addr_withtype(const char *arg,
 		wi.u.wireaddr.addrlen = strlen(address);
 		strncpy((char * restrict)&wi.u.wireaddr.addr,
 			address, sizeof(wi.u.wireaddr.addr) - 1);
-		wi.u.wireaddr.port = port;
+		if (port == 0)
+			wi.u.wireaddr.port = ld->portnum;
+		else
+			wi.u.wireaddr.port = port;
 
 		tal_arr_expand(&ld->proposed_listen_announce, ADDR_ANNOUNCE);
 		tal_arr_expand(&ld->proposed_wireaddr, wi);
 	}
-#endif
 
 	return NULL;
 
@@ -315,8 +312,7 @@ static char *opt_add_addr(const char *arg, struct lightningd *ld)
 	struct wireaddr_internal addr;
 
 	/* handle in case you used the addr option with an .onion */
-	if (parse_wireaddr_internal(arg, &addr, 0, true, false, true,
-				    deprecated_apis, NULL)) {
+	if (parse_wireaddr_internal(arg, &addr, 0, true, false, true, NULL)) {
 		if (addr.itype == ADDR_INTERNAL_WIREADDR &&
 		    addr.u.wireaddr.type == ADDR_TYPE_TOR_V3) {
 				log_unusual(ld->log, "You used `--addr=%s` option with an .onion address, please use"
@@ -362,8 +358,7 @@ static char *opt_add_bind_addr(const char *arg, struct lightningd *ld)
 	struct wireaddr_internal addr;
 
 	/* handle in case you used the bind option with an .onion */
-	if (parse_wireaddr_internal(arg, &addr, 0, true, false, true,
-				    deprecated_apis, NULL)) {
+	if (parse_wireaddr_internal(arg, &addr, 0, true, false, true, NULL)) {
 		if (addr.itype == ADDR_INTERNAL_WIREADDR &&
 		    addr.u.wireaddr.type == ADDR_TYPE_TOR_V3) {
 				log_unusual(ld->log, "You used `--bind-addr=%s` option with an .onion address,"
@@ -458,11 +453,14 @@ static char *opt_add_proxy_addr(const char *arg, struct lightningd *ld)
 
 static char *opt_add_plugin(const char *arg, struct lightningd *ld)
 {
+	struct plugin *p;
 	if (plugin_blacklisted(ld->plugins, arg)) {
 		log_info(ld->log, "%s: disabled via disable-plugin", arg);
 		return NULL;
 	}
-	plugin_register(ld->plugins, arg, NULL, false, NULL, NULL);
+	p = plugin_register(ld->plugins, arg, NULL, false, NULL, NULL);
+	if (!p)
+		return tal_fmt(NULL, "Failed to register %s: %s", arg, strerror(errno));
 	return NULL;
 }
 
@@ -485,12 +483,25 @@ static char *opt_clear_plugins(struct lightningd *ld)
 
 static char *opt_important_plugin(const char *arg, struct lightningd *ld)
 {
+	struct plugin *p;
 	if (plugin_blacklisted(ld->plugins, arg)) {
 		log_info(ld->log, "%s: disabled via disable-plugin", arg);
 		return NULL;
 	}
-	plugin_register(ld->plugins, arg, NULL, true, NULL, NULL);
+	p = plugin_register(ld->plugins, arg, NULL, true, NULL, NULL);
+	if (!p)
+		return tal_fmt(NULL, "Failed to register %s: %s", arg, strerror(errno));
 	return NULL;
+}
+
+/* Test code looks in logs, so we print prompts to log as well as stdout */
+static void prompt(struct lightningd *ld, const char *str)
+{
+	printf("%s\n", str);
+	log_debug(ld->log, "PROMPT: %s", str);
+	/* If we don't flush we might end up being buffered and we might seem
+	 * to hang while we wait for the password. */
+	fflush(stdout);
 }
 
 /* Prompt the user to enter a password, from which will be derived the key used
@@ -502,23 +513,34 @@ static char *opt_important_plugin(const char *arg, struct lightningd *ld)
 static char *opt_set_hsm_password(struct lightningd *ld)
 {
 	char *passwd, *passwd_confirmation, *err_msg;
+	int is_encrypted;
 
-	printf("The hsm_secret is encrypted with a password. In order to "
-	       "decrypt it and start the node you must provide the password.\n");
-	printf("Enter hsm_secret password:\n");
-	/* If we don't flush we might end up being buffered and we might seem
-	 * to hang while we wait for the password. */
-	fflush(stdout);
+        is_encrypted = is_hsm_secret_encrypted("hsm_secret");
+	if (is_encrypted == -1)
+		return tal_fmt(NULL, "Could not access 'hsm_secret': %s",
+			       strerror(errno));
+
+	prompt(ld, "The hsm_secret is encrypted with a password. In order to "
+	       "decrypt it and start the node you must provide the password.");
+	prompt(ld, "Enter hsm_secret password:");
 
 	passwd = read_stdin_pass_with_exit_code(&err_msg, &opt_exitcode);
 	if (!passwd)
 		return err_msg;
-	printf("Confirm hsm_secret password:\n");
-	fflush(stdout);
-	passwd_confirmation = read_stdin_pass_with_exit_code(&err_msg, &opt_exitcode);
-	if (!passwd_confirmation)
-		return err_msg;
-	printf("\n");
+	if (!is_encrypted) {
+		prompt(ld, "Confirm hsm_secret password:");
+		fflush(stdout);
+		passwd_confirmation = read_stdin_pass_with_exit_code(&err_msg, &opt_exitcode);
+		if (!passwd_confirmation)
+			return err_msg;
+
+		if (!streq(passwd, passwd_confirmation)) {
+			opt_exitcode = EXITCODE_HSM_BAD_PASSWORD;
+			return "Passwords confirmation mismatch.";
+		}
+		free(passwd_confirmation);
+	}
+	prompt(ld, "");
 
 	ld->config.keypass = tal(NULL, struct secret);
 
@@ -528,7 +550,6 @@ static char *opt_set_hsm_password(struct lightningd *ld)
 
 	ld->encrypted_hsm = true;
 	free(passwd);
-	free(passwd_confirmation);
 
 	return NULL;
 }
@@ -614,8 +635,8 @@ static char *opt_force_featureset(const char *optarg,
 	char **parts = tal_strsplit(tmpctx, optarg, "/", STR_EMPTY_OK);
 	if (tal_count(parts) != NUM_FEATURE_PLACE + 1) {
 		if (!strstarts(optarg, "-") && !strstarts(optarg, "+"))
-			return "Expected 5 feature sets (init/globalinit/"
-			       " node_announce/channel/bolt11) each terminated by /"
+			return "Expected 8 feature sets (init/globalinit/"
+			       " node_announce/channel/bolt11/b12offer/b12invreq/b12inv) each terminated by /"
 			       " OR +/-<single_bit_num>";
 
 		char *endp;
@@ -664,6 +685,10 @@ static void dev_register_opts(struct lightningd *ld)
 	opt_register_noarg("--dev-no-reconnect", opt_set_invbool,
 			   &ld->reconnect,
 			   "Disable automatic reconnect-attempts by this node, but accept incoming");
+	opt_register_noarg("--dev-fast-reconnect", opt_set_bool,
+			   &ld->dev_fast_reconnect,
+			   "Make max default reconnect delay 3 (not 300) seconds");
+
 	opt_register_noarg("--dev-fail-on-subdaemon-fail", opt_set_bool,
 			   &ld->dev_subdaemon_fail, opt_hidden);
 	opt_register_arg("--dev-disconnect=<filename>", opt_subd_dev_disconnect,
@@ -720,13 +745,18 @@ static void dev_register_opts(struct lightningd *ld)
 	opt_register_noarg("--dev-no-modern-onion", opt_set_bool,
 			   &ld->dev_ignore_modern_onion,
 			   "Ignore modern onion messages");
-	opt_register_noarg("--dev-no-obsolete-onion", opt_set_bool,
-			   &ld->dev_ignore_obsolete_onion,
-			   "Ignore obsolete onion messages");
 	opt_register_arg("--dev-disable-commit-after",
 			 opt_set_intval, opt_show_intval,
 			 &ld->dev_disable_commit,
 			 "Disable commit timer after this many commits");
+	opt_register_noarg("--dev-no-ping-timer", opt_set_bool,
+			   &ld->dev_no_ping_timer,
+			   "Don't hang up if we don't get a ping response");
+	opt_register_arg("--dev-onion-reply-length",
+			 opt_set_uintval,
+			 opt_show_uintval,
+			 &dev_onion_reply_length,
+			 "Send onion errors of custom length");
 }
 #endif /* DEVELOPER */
 
@@ -743,6 +773,10 @@ static const struct config testnet_config = {
 
 	/* Testnet blockspace is free. */
 	.max_concurrent_htlcs = 483,
+
+	/* channel defaults for htlc min/max values */
+	.htlc_minimum_msat = AMOUNT_MSAT(0),
+	.htlc_maximum_msat = AMOUNT_MSAT(-1ULL),  /* no limit */
 
 	/* Max amount of dust allowed per channel (50ksat) */
 	.max_dust_htlc_exposure_msat = AMOUNT_MSAT(50000000),
@@ -767,15 +801,18 @@ static const struct config testnet_config = {
 
 	.use_dns = true,
 
+	/* Turn off IP address announcement discovered via peer `remote_addr` */
+	.disable_ip_discovery = false,
+
 	/* Sets min_effective_htlc_capacity - at 1000$/BTC this is 10ct */
 	.min_capacity_sat = 10000,
-
-	.use_v3_autotor = true,
 
 	/* 1 minute should be enough for anyone! */
 	.connection_timeout_secs = 60,
 
 	.exp_offers = IFEXPERIMENTAL(true, false),
+
+	.allowdustreserve = false,
 };
 
 /* aka. "Dude, where's my coins?" */
@@ -792,6 +829,10 @@ static const struct config mainnet_config = {
 
 	/* While up to 483 htlcs are possible we do 30 by default (as eclair does) to save blockspace */
 	.max_concurrent_htlcs = 30,
+
+	/* defaults for htlc min/max values */
+	.htlc_minimum_msat = AMOUNT_MSAT(0),
+	.htlc_maximum_msat = AMOUNT_MSAT(-1ULL),  /* no limit */
 
 	/* Max amount of dust allowed per channel (50ksat) */
 	.max_dust_htlc_exposure_msat = AMOUNT_MSAT(50000000),
@@ -826,16 +867,18 @@ static const struct config mainnet_config = {
 
 	.use_dns = true,
 
+	/* Turn off IP address announcement discovered via peer `remote_addr` */
+	.disable_ip_discovery = false,
+
 	/* Sets min_effective_htlc_capacity - at 1000$/BTC this is 10ct */
 	.min_capacity_sat = 10000,
-
-	/* Allow to define the default behavior of tor services calls*/
-	.use_v3_autotor = true,
 
 	/* 1 minute should be enough for anyone! */
 	.connection_timeout_secs = 60,
 
 	.exp_offers = IFEXPERIMENTAL(true, false),
+
+	.allowdustreserve = false,
 };
 
 static void check_config(struct lightningd *ld)
@@ -855,7 +898,7 @@ static void check_config(struct lightningd *ld)
 	if (ld->always_use_proxy && !ld->proxyaddr)
 		fatal("--always-use-proxy needs --proxy");
 
-	if (ld->daemon_parent_fd != -1 && !ld->logfile)
+	if (ld->daemon_parent_fd != -1 && !ld->logfiles)
 		fatal("--daemon needs --log-file");
 }
 
@@ -969,6 +1012,9 @@ static char *opt_set_onion_messages(struct lightningd *ld)
 	feature_set_or(ld->our_features,
 		       take(feature_set_for_feature(NULL,
 						    OPTIONAL_FEATURE(OPT_ONION_MESSAGES))));
+	feature_set_or(ld->our_features,
+		       take(feature_set_for_feature(NULL,
+						    OPTIONAL_FEATURE(OPT_ROUTE_BLINDING))));
 	return NULL;
 }
 
@@ -984,6 +1030,12 @@ static char *opt_set_offers(struct lightningd *ld)
 {
 	ld->config.exp_offers = true;
 	return opt_set_onion_messages(ld);
+}
+
+static char *opt_set_db_upgrade(const char *arg, struct lightningd *ld)
+{
+	ld->db_upgrade_ok = tal(ld, bool);
+	return opt_set_bool_arg(arg, ld->db_upgrade_ok);
 }
 
 static void register_opts(struct lightningd *ld)
@@ -1037,7 +1089,7 @@ static void register_opts(struct lightningd *ld)
 	opt_register_early_noarg("--experimental-onion-messages",
 				 opt_set_onion_messages, ld,
 				 "EXPERIMENTAL: enable send, receive and relay"
-				 " of onion messages");
+				 " of onion messages and blinded payments");
 	opt_register_early_noarg("--experimental-offers",
 				 opt_set_offers, ld,
 				 "EXPERIMENTAL: enable send and receive of offers"
@@ -1089,6 +1141,12 @@ static void register_opts(struct lightningd *ld)
 	opt_register_arg("--fee-per-satoshi", opt_set_u32, opt_show_u32,
 			 &ld->config.fee_per_satoshi,
 			 "Microsatoshi fee for every satoshi in HTLC");
+	opt_register_arg("--htlc-minimum-msat", opt_set_msat, NULL,
+			 &ld->config.htlc_minimum_msat,
+			 "The default minimal value an HTLC must carry in order to be forwardable for new channels");
+	opt_register_arg("--htlc-maximum-msat", opt_set_msat, NULL,
+			 &ld->config.htlc_maximum_msat,
+			 "The default maximal value an HTLC must carry in order to be forwardable for new channel");
 	opt_register_arg("--max-concurrent-htlcs", opt_set_u32, opt_show_u32,
 			 &ld->config.max_concurrent_htlcs,
 			 "Number of HTLCs one channel can handle concurrently. Should be between 1 and 483");
@@ -1107,6 +1165,9 @@ static void register_opts(struct lightningd *ld)
 	opt_register_arg("--announce-addr", opt_add_announce_addr, NULL,
 			 ld,
 			 "Set an IP address (v4 or v6) or .onion v3 to announce, but not listen on");
+	opt_register_noarg("--disable-ip-discovery", opt_set_bool,
+			 &ld->config.disable_ip_discovery,
+			 "Turn off announcement of discovered public IPs");
 
 	opt_register_noarg("--offline", opt_set_offline, ld,
 			   "Start in offline-mode (do not automatically reconnect and do not accept incoming connections)");
@@ -1114,24 +1175,22 @@ static void register_opts(struct lightningd *ld)
 			 &ld->autolisten,
 			 "If true, listen on default port and announce if it seems to be a public interface");
 
+	opt_register_arg("--dev-allowdustreserve", opt_set_bool_arg, opt_show_bool,
+			 &ld->config.allowdustreserve,
+			 "If true, we allow the `fundchannel` RPC command and the `openchannel` plugin hook to set a reserve that is below the dust limit.");
+
 	opt_register_arg("--proxy", opt_add_proxy_addr, NULL,
 			ld,"Set a socks v5 proxy IP address and port");
 	opt_register_arg("--tor-service-password", opt_set_talstr, NULL,
 			 &ld->tor_service_password,
 			 "Set a Tor hidden service password");
 
-#if EXPERIMENTAL_FEATURES
-	opt_register_arg("--experimental-accept-extra-tlv-types",
+	opt_register_arg("--accept-htlc-tlv-types",
 			 opt_set_accept_extra_tlv_types, NULL, ld,
-			 "Comma separated list of extra TLV types to accept.");
-#endif
+			 "Comma separated list of extra HTLC TLV types to accept.");
 
 	opt_register_early_noarg("--disable-dns", opt_set_invbool, &ld->config.use_dns,
 				 "Disable DNS lookups of peers");
-
-	if (deprecated_apis)
-		opt_register_noarg("--enable-autotor-v2-mode", opt_set_invbool, &ld->config.use_v3_autotor,
-				   opt_hidden);
 
 	opt_register_noarg("--encrypted-hsm", opt_set_hsm_password, ld,
 					  "Set the password to encrypt hsm_secret with. If no password is passed through command line, "
@@ -1161,6 +1220,10 @@ static void register_opts(struct lightningd *ld)
 			 ld,
 			 "experimental: alternate port for peers to connect"
 			 " using WebSockets (RFC6455)");
+	opt_register_arg("--database-upgrade",
+			 opt_set_db_upgrade, NULL,
+			 ld,
+			 "Set to true to allow database upgrades even on non-final releases (WARNING: you won't be able to downgrade!)");
 	opt_register_logging(ld);
 	opt_register_version();
 
@@ -1408,6 +1471,14 @@ static void json_add_opt_addrs(struct json_stream *response,
 	}
 }
 
+static void json_add_opt_log_to_files(struct json_stream *response,
+			       const char *name0,
+			       const char **logfiles)
+{
+	for (size_t i = 0; i < tal_count(logfiles); i++)
+		json_add_string(response, name0, logfiles[i]);
+}
+
 struct json_add_opt_alt_subdaemon_args {
 	const char *name0;
 	struct json_stream *response;
@@ -1439,7 +1510,7 @@ static void add_config(struct lightningd *ld,
 		       const char *name, size_t len)
 {
 	char *name0 = tal_strndup(tmpctx, name, len);
-	const char *answer = NULL;
+	char *answer = NULL;
 	char buf[OPT_SHOW_LEN + sizeof("...")];
 
 #if DEVELOPER
@@ -1507,15 +1578,14 @@ static void add_config(struct lightningd *ld,
 		if (opt->desc == opt_hidden) {
 			/* Ignore hidden options (deprecated) */
 		} else if (opt->show) {
-			strcpy(buf + OPT_SHOW_LEN, "...");
 			opt->show(buf, opt->u.carg);
+			strcpy(buf + OPT_SHOW_LEN - 1, "...");
 
 			if (streq(buf, "true") || streq(buf, "false")
-			    || strspn(buf, "0123456789.") == strlen(buf)) {
+			    || (!streq(buf, "") && strspn(buf, "0123456789.") == strlen(buf))) {
 				/* Let pure numbers and true/false through as
 				 * literals. */
-				json_add_literal(response, name0,
-						 buf, strlen(buf));
+				json_add_primitive(response, name0, buf);
 				return;
 			}
 
@@ -1536,9 +1606,10 @@ static void add_config(struct lightningd *ld,
 			if (ld->rgb)
 				answer = tal_hexstr(name0, ld->rgb, 3);
 		} else if (opt->cb_arg == (void *)opt_set_alias) {
-			answer = (const char *)ld->alias;
+			answer = (char *)ld->alias;
 		} else if (opt->cb_arg == (void *)arg_log_to_file) {
-			answer = ld->logfile;
+			if (ld->logfiles)
+				json_add_opt_log_to_files(response, name0, ld->logfiles);
 		} else if (opt->cb_arg == (void *)opt_add_addr) {
 			json_add_opt_addrs(response, name0,
 					   ld->proposed_wireaddr,
@@ -1577,6 +1648,11 @@ static void add_config(struct lightningd *ld,
 				json_add_u32(response, name0,
 					     ld->websocket_port);
 			return;
+		} else if (opt->cb_arg == (void *)opt_set_db_upgrade) {
+			if (ld->db_upgrade_ok)
+				json_add_bool(response, name0,
+					      *ld->db_upgrade_ok);
+			return;
 		} else if (opt->cb_arg == (void *)opt_important_plugin) {
 			/* Do nothing, this is already handled by
 			 * opt_add_plugin.  */
@@ -1586,11 +1662,24 @@ static void add_config(struct lightningd *ld,
 			/* FIXME: We actually treat it as if they specified
 			 * --plugin for each one, so ignore these */
 		} else if (opt->cb_arg == (void *)opt_set_msat) {
-			json_add_amount_msat_only(response, name0, ld->config.max_dust_htlc_exposure_msat);
-#if EXPERIMENTAL_FEATURES
+			/* We allow -msat not _msat here, unlike
+			 * json_add_amount_msat_only */
+			assert(strends(name0, "-msat"));
+			json_add_string(response, name0,
+					fmt_amount_msat(tmpctx,
+							*(struct amount_msat *)
+							opt->u.carg));
 		} else if (opt->cb_arg == (void *)opt_set_accept_extra_tlv_types) {
-                        /* TODO Actually print the option */
-#endif
+			for (size_t i = 0;
+			     i < tal_count(ld->accept_extra_tlv_types);
+			     i++) {
+				if (i == 0)
+					answer = tal_fmt(name0, "%"PRIu64,
+							 ld->accept_extra_tlv_types[i]);
+				else
+					tal_append_fmt(&answer, ",%"PRIu64,
+						       ld->accept_extra_tlv_types[i]);
+			}
 #if DEVELOPER
 		} else if (strstarts(name, "dev-")) {
 			/* Ignore dev settings */
@@ -1614,14 +1703,14 @@ static struct command_result *json_listconfigs(struct command *cmd,
 {
 	size_t i;
 	struct json_stream *response = NULL;
-	const jsmntok_t *configtok;
+	const char *configname;
 
 	if (!param(cmd, buffer, params,
-		   p_opt("config", param_tok, &configtok),
+		   p_opt("config", param_string, &configname),
 		   NULL))
 		return command_param_failed();
 
-	if (!configtok) {
+	if (!configname) {
 		response = json_stream_success(cmd);
 		json_add_string(response, "# version", version());
 	}
@@ -1641,9 +1730,8 @@ static struct command_result *json_listconfigs(struct command *cmd,
 			if (name[0] != '-')
 				continue;
 
-			if (configtok
-			    && !memeq(buffer + configtok->start,
-				      configtok->end - configtok->start,
+			if (configname
+			    && !memeq(configname, strlen(configname),
 				      name + 1, len - 1))
 				continue;
 
@@ -1657,11 +1745,10 @@ static struct command_result *json_listconfigs(struct command *cmd,
 		}
 	}
 
-	if (configtok && !response) {
+	if (configname && !response) {
 		return command_fail(cmd, JSONRPC2_INVALID_PARAMS,
-				    "Unknown config option '%.*s'",
-				    json_tok_full_len(configtok),
-				    json_tok_full(buffer, configtok));
+				    "Unknown config option %s",
+				    configname);
 	}
 	return command_success(cmd, response);
 }

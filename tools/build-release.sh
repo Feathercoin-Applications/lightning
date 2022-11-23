@@ -8,7 +8,7 @@ if [ "$1" = "--inside-docker" ]; then
     cd /build
     ./configure
     make
-    make install DESTDIR=/"$VER"
+    make install DESTDIR=/"$VER" RUST_PROFILE=release
     cd /"$VER" && tar cvfz /release/clightning-"$VER".tar.gz -- *
     exit 0
 fi
@@ -72,6 +72,8 @@ if [ -z "$MTIME" ]; then
     exit 1
 fi
 
+# submodcheck needs to know if we have lowdown
+./configure --reconfigure
 # If it's a completely clean directory, we need submodules!
 make submodcheck
 mkdir -p release
@@ -80,11 +82,11 @@ for target in $TARGETS; do
     [ "$platform" != "$target" ] || continue
     case $platform in
 	Fedora-28-amd64)
-	    DOCKERFILE=contrib/Dockerfile.builder.fedora
+	    DOCKERFILE=contrib/docker/Dockerfile.builder.fedora
 	    TAG=fedora
 	    ;;
 	Ubuntu-16.04-amd64)
-	    DOCKERFILE=contrib/Dockerfile.builder
+	    DOCKERFILE=contrib/docker/Dockerfile.builder
 	    TAG=ubuntu-amd64
 	    ;;
 	*)

@@ -104,6 +104,7 @@ struct subd *new_global_subd(struct lightningd *ld,
 
 /**
  * new_channel_subd - create a new subdaemon for a specific channel.
+ * @ctx: context to allocate from (usually peer or channel)
  * @ld: global state
  * @name: basename of daemon
  * @channel: channel to associate.
@@ -120,7 +121,8 @@ struct subd *new_global_subd(struct lightningd *ld,
  * that many @fds are received before calling again.  If it returns -1, the
  * subdaemon is shutdown.
  */
-struct subd *new_channel_subd_(struct lightningd *ld,
+struct subd *new_channel_subd_(const tal_t *ctx,
+			       struct lightningd *ld,
 			       const char *name,
 			       void *channel,
 			       const struct node_id *node_id,
@@ -139,10 +141,10 @@ struct subd *new_channel_subd_(struct lightningd *ld,
 						   const char *happenings),
 			       ...);
 
-#define new_channel_subd(ld, name, channel, node_id, log, 		\
+#define new_channel_subd(ctx, ld, name, channel, node_id, log, 		\
 			 talks_to_peer, msgname, msgcb, errcb, 		\
 			 billboardcb, ...)				\
-	new_channel_subd_((ld), (name), (channel), (node_id), 		\
+	new_channel_subd_((ctx), (ld), (name), (channel), (node_id),	\
 			  (log), (talks_to_peer),			\
 			  (msgname), (msgcb),				\
 			  typesafe_cb_postargs(void, void *, (errcb),	\
@@ -209,7 +211,7 @@ struct subd_req *subd_req_(const tal_t *ctx,
 void subd_release_channel(struct subd *owner, const void *channel);
 
 /**
- * subd_shutdown - try to politely shut down a subdaemon.
+ * subd_shutdown - try to politely shut down a (global) subdaemon.
  * @subd: subd to shutdown.
  * @seconds: maximum seconds to wait for it to exit.
  *
@@ -223,13 +225,10 @@ void subd_release_channel(struct subd *owner, const void *channel);
 struct subd *subd_shutdown(struct subd *subd, unsigned int seconds);
 
 /**
- * subd_shutdown_remaining - kill all remaining (per-peer) subds
+ * subd_shutdown_nonglobals - kill all per-peer subds
  * @ld: lightningd
- *
- * They should already be exiting (since we shutdown hsmd), but
- * make sure they have.
  */
-void subd_shutdown_remaining(struct lightningd *ld);
+void subd_shutdown_nonglobals(struct lightningd *ld);
 
 /* Ugly helper to get full pathname of the current binary. */
 const char *find_my_abspath(const tal_t *ctx, const char *argv0);

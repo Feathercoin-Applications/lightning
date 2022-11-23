@@ -198,7 +198,7 @@ for programs to deal with them sanely, and also perform translations.
 
 We use JSON schemas to validate that JSON-RPC returns are in the
 correct form, and also to generate documentation.  See
-[doc/schemas/WRITING_SCHEMAS.md](WRITING_SCHEMAS.md).
+[writing schemas manpage](schemas/WRITING_SCHEMAS.md).
 
 ## Changing JSON APIs
 
@@ -218,7 +218,7 @@ cautiously as too many parameters get unwieldy quickly.
 ## Github Workflows
 
 We have adopted a number of workflows to facilitate the development of
-c-lightning, and to make things more pleasant for contributors.
+Core Lightning, and to make things more pleasant for contributors.
 
 ### Changelog Entries in Commit Messages
 

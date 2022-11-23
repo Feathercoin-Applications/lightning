@@ -4,13 +4,15 @@
 #include <common/ecdh.h>
 #include <common/errcode.h>
 #include <common/hsm_encryption.h>
-#include <common/json_helpers.h>
-#include <common/param.h>
+#include <common/hsm_version.h>
+#include <common/invoice_path_id.h>
+#include <common/json_command.h>
+#include <common/json_param.h>
+#include <common/jsonrpc_errors.h>
 #include <common/type_to_string.h>
 #include <errno.h>
 #include <hsmd/hsmd_wiregen.h>
 #include <lightningd/hsm_control.h>
-#include <lightningd/json.h>
 #include <lightningd/jsonrpc.h>
 #include <lightningd/lightningd.h>
 #include <lightningd/subd.h>
@@ -83,24 +85,22 @@ struct ext_key *hsm_init(struct lightningd *ld)
 
 	/* We actually send requests synchronously: only status is async. */
 	if (socketpair(AF_LOCAL, SOCK_STREAM, 0, fds) != 0)
-		err(HSM_GENERIC_ERROR, "Could not create hsm socketpair");
+		err(EXITCODE_HSM_GENERIC_ERROR, "Could not create hsm socketpair");
 
 	ld->hsm = new_global_subd(ld, "lightning_hsmd",
 				  hsmd_wire_name,
 				  hsm_msg,
 				  take(&fds[1]), NULL);
 	if (!ld->hsm)
-		err(HSM_GENERIC_ERROR, "Could not subd hsm");
+		err(EXITCODE_HSM_GENERIC_ERROR, "Could not subd hsm");
 
 	/* If hsm_secret is encrypted and the --encrypted-hsm startup option is
 	 * not passed, don't let hsmd use the first 32 bytes of the cypher as the
 	 * actual secret. */
 	if (!ld->config.keypass) {
-		struct stat st;
-		if (stat("hsm_secret", &st) == 0 &&
-			 st.st_size == ENCRYPTED_HSM_SECRET_LEN)
-			errx(HSM_ERROR_IS_ENCRYPT, "hsm_secret is encrypted, you need to pass the "
-			        "--encrypted-hsm startup option.");
+		if (is_hsm_secret_encrypted("hsm_secret") == 1)
+			errx(EXITCODE_HSM_ERROR_IS_ENCRYPT, "hsm_secret is encrypted, you need to pass the "
+			     "--encrypted-hsm startup option.");
 	}
 
 	ld->hsm_fd = fds[0];
@@ -111,48 +111,99 @@ struct ext_key *hsm_init(struct lightningd *ld)
 							 IFDEV(ld->dev_force_privkey, NULL),
 							 IFDEV(ld->dev_force_bip32_seed, NULL),
 							 IFDEV(ld->dev_force_channel_secrets, NULL),
-							 IFDEV(ld->dev_force_channel_secrets_shaseed, NULL))))
-		err(HSM_GENERIC_ERROR, "Writing init msg to hsm");
+							  IFDEV(ld->dev_force_channel_secrets_shaseed, NULL),
+							  HSM_MIN_VERSION,
+							  HSM_MAX_VERSION)))
+		err(EXITCODE_HSM_GENERIC_ERROR, "Writing init msg to hsm");
 
 	bip32_base = tal(ld, struct ext_key);
 	msg = wire_sync_read(tmpctx, ld->hsm_fd);
-	if (!fromwire_hsmd_init_reply(msg,
-				      &ld->id, bip32_base,
-				      &ld->bolt12_base,
-				      &ld->onion_reply_secret)) {
-		if (ld->config.keypass)
-			errx(HSM_BAD_PASSWORD, "Wrong password for encrypted hsm_secret.");
-		errx(HSM_GENERIC_ERROR, "HSM did not give init reply");
+	if (!fromwire_hsmd_init_reply_v2(msg,
+					 &ld->id, bip32_base,
+					 &ld->bolt12_base)) {
+		/* v1 had x-only pubkey */
+		u8 pubkey32[33];
+		/* And gave us a secret to use for onion_reply paths */
+		struct secret onion_reply_secret;
+
+		pubkey32[0] = SECP256K1_TAG_PUBKEY_EVEN;
+		if (!fromwire_hsmd_init_reply_v1(msg,
+					 &ld->id, bip32_base,
+					 pubkey32 + 1,
+					 &onion_reply_secret)) {
+			if (ld->config.keypass)
+				errx(EXITCODE_HSM_BAD_PASSWORD, "Wrong password for encrypted hsm_secret.");
+			errx(EXITCODE_HSM_GENERIC_ERROR, "HSM did not give init reply");
+		}
+		if (!pubkey_from_der(pubkey32, sizeof(pubkey32),
+				     &ld->bolt12_base))
+			errx(EXITCODE_HSM_GENERIC_ERROR,
+			     "HSM gave invalid v1 bolt12_base");
 	}
+
+	/* This is equivalent to makesecret("bolt12-invoice-base") */
+	msg = towire_hsmd_derive_secret(NULL, tal_dup_arr(tmpctx, u8,
+							  (const u8 *)INVOICE_PATH_BASE_STRING,
+							  strlen(INVOICE_PATH_BASE_STRING), 0));
+	if (!wire_sync_write(ld->hsm_fd, take(msg)))
+		err(EXITCODE_HSM_GENERIC_ERROR, "Writing derive_secret msg to hsm");
+
+	msg = wire_sync_read(tmpctx, ld->hsm_fd);
+	if (!fromwire_hsmd_derive_secret_reply(msg, &ld->invoicesecret_base))
+		err(EXITCODE_HSM_GENERIC_ERROR, "Bad derive_secret_reply");
 
 	return bip32_base;
 }
 
-static struct command_result *json_getsharedsecret(struct command *cmd,
+static struct command_result *json_makesecret(struct command *cmd,
 					   const char *buffer,
 					   const jsmntok_t *obj UNNEEDED,
 					   const jsmntok_t *params)
 {
-	struct pubkey *point;
-	struct secret ss;
+	u8 *data;
+	const char *strdata;
 	struct json_stream *response;
+	struct secret secret;
 
 	if (!param(cmd, buffer, params,
-		   p_req("point", &param_pubkey, &point),
+		   p_opt("hex", param_bin_from_hex, &data),
+		   p_opt("string", param_string, &strdata),
 		   NULL))
 		return command_param_failed();
 
-	ecdh(point, &ss);
+	if (strdata) {
+		if (data)
+			return command_fail(cmd, JSONRPC2_INVALID_PARAMS,
+					    "Cannot have both hex and string");
+		data = tal_dup_arr(cmd, u8, (u8 *)strdata, strlen(strdata), 0);
+	} else {
+		if (!data)
+			return command_fail(cmd, JSONRPC2_INVALID_PARAMS,
+					    "Must have either hex or string");
+	}
+
+
+	u8 *msg = towire_hsmd_derive_secret(cmd, data);
+	if (!wire_sync_write(cmd->ld->hsm_fd, take(msg)))
+		return command_fail(cmd, LIGHTNINGD,
+                     "Could not write to HSM: %s", strerror(errno));
+
+
+	msg = wire_sync_read(tmpctx, cmd->ld->hsm_fd);
+	if (!fromwire_hsmd_derive_secret_reply(msg, &secret))
+		return command_fail(cmd, LIGHTNINGD,
+                     "Bad reply from HSM: %s", strerror(errno));
+
+
 	response = json_stream_success(cmd);
-	json_add_secret(response, "shared_secret", &ss);
+	json_add_secret(response, "secret", &secret);
 	return command_success(cmd, response);
 }
 
-static const struct json_command getsharedsecret_command = {
-	"getsharedsecret",
-	"utility", /* FIXME: Or "crypto"?  */
-	&json_getsharedsecret,
-	"Compute the hash of the Elliptic Curve Diffie Hellman shared secret point from "
-	"this node private key and an input {point}."
+static const struct json_command makesecret_command = {
+	"makesecret",
+	"utility",
+	&json_makesecret,
+	"Get a pseudorandom secret key, using some {hex} data."
 };
-AUTODATA(json_command, &getsharedsecret_command);
+AUTODATA(json_command, &makesecret_command);

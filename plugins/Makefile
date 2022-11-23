@@ -1,8 +1,12 @@
 PLUGIN_PAY_SRC := plugins/pay.c
+PLUGIN_PAY_HEADER := 
 PLUGIN_PAY_OBJS := $(PLUGIN_PAY_SRC:.c=.o)
 
 PLUGIN_AUTOCLEAN_SRC := plugins/autoclean.c
 PLUGIN_AUTOCLEAN_OBJS := $(PLUGIN_AUTOCLEAN_SRC:.c=.o)
+
+PLUGIN_chanbackup_SRC := plugins/chanbackup.c
+PLUGIN_chanbackup_OBJS := $(PLUGIN_chanbackup_SRC:.c=.o)
 
 PLUGIN_TOPOLOGY_SRC := plugins/topology.c
 PLUGIN_TOPOLOGY_OBJS := $(PLUGIN_TOPOLOGY_SRC:.c=.o)
@@ -12,6 +16,9 @@ PLUGIN_TXPREPARE_OBJS := $(PLUGIN_TXPREPARE_SRC:.c=.o)
 
 PLUGIN_BCLI_SRC := plugins/bcli.c
 PLUGIN_BCLI_OBJS := $(PLUGIN_BCLI_SRC:.c=.o)
+
+PLUGIN_COMMANDO_SRC := plugins/commando.c
+PLUGIN_COMMANDO_OBJS := $(PLUGIN_COMMANDO_SRC:.c=.o)
 
 PLUGIN_KEYSEND_SRC := plugins/keysend.c
 PLUGIN_KEYSEND_OBJS := $(PLUGIN_KEYSEND_SRC:.c=.o)
@@ -30,7 +37,7 @@ PLUGIN_OFFERS_HEADER := $(PLUGIN_OFFERS_SRC:.c=.h)
 
 PLUGIN_FETCHINVOICE_SRC := plugins/fetchinvoice.c
 PLUGIN_FETCHINVOICE_OBJS := $(PLUGIN_FETCHINVOICE_SRC:.c=.o)
-PLUGIN_FETCHINVOICE_HEADER := 
+PLUGIN_FETCHINVOICE_HEADER :=
 
 PLUGIN_SPENDER_SRC :=				\
 	plugins/spender/fundchannel.c		\
@@ -55,7 +62,9 @@ PLUGIN_FUNDER_OBJS := $(PLUGIN_FUNDER_SRC:.c=.o)
 
 PLUGIN_ALL_SRC :=				\
 	$(PLUGIN_AUTOCLEAN_SRC)			\
+	$(PLUGIN_chanbackup_SRC)		\
 	$(PLUGIN_BCLI_SRC)			\
+	$(PLUGIN_COMMANDO_SRC)			\
 	$(PLUGIN_FETCHINVOICE_SRC)		\
 	$(PLUGIN_FUNDER_SRC)			\
 	$(PLUGIN_TOPOLOGY_SRC)			\
@@ -68,6 +77,7 @@ PLUGIN_ALL_SRC :=				\
 	$(PLUGIN_SPENDER_SRC)
 
 PLUGIN_ALL_HEADER :=				\
+	$(PLUGIN_PAY_HEADER)			\
 	$(PLUGIN_LIB_HEADER)			\
 	$(PLUGIN_FUNDER_HEADER)			\
 	$(PLUGIN_PAY_LIB_HEADER)		\
@@ -75,9 +85,11 @@ PLUGIN_ALL_HEADER :=				\
 	$(PLUGIN_SPENDER_HEADER)
 PLUGIN_ALL_OBJS := $(PLUGIN_ALL_SRC:.c=.o)
 
-PLUGINS :=					\
+C_PLUGINS :=					\
 	plugins/autoclean			\
+	plugins/chanbackup			\
 	plugins/bcli				\
+	plugins/commando			\
 	plugins/fetchinvoice			\
 	plugins/funder				\
 	plugins/topology			\
@@ -87,14 +99,21 @@ PLUGINS :=					\
 	plugins/txprepare			\
 	plugins/spenderp
 
-# Make sure these depend on everything.
-ALL_C_SOURCES += $(PLUGIN_ALL_SRC)
-ALL_C_HEADERS += $(PLUGIN_ALL_HEADER)
-ALL_PROGRAMS += $(PLUGINS)
+PLUGINS := $(C_PLUGINS)
+
+ifneq ($(RUST),0)
+# Builtin plugins must be in this plugins dir to work when we're executed
+# *without* make install.
+plugins/cln-grpc: target/${RUST_PROFILE}/cln-grpc
+	@cp $< $@
+
+PLUGINS += plugins/cln-grpc
+endif
 
 PLUGIN_COMMON_OBJS :=				\
 	bitcoin/base58.o			\
 	bitcoin/block.o				\
+	bitcoin/chainparams.o			\
 	bitcoin/feerate.o			\
 	bitcoin/preimage.o			\
 	bitcoin/privkey.o			\
@@ -118,17 +137,18 @@ PLUGIN_COMMON_OBJS :=				\
 	common/daemon.o				\
 	common/features.o			\
 	common/hash_u5.o			\
-	common/json.o				\
-	common/json_helpers.o			\
+	common/json_param.o			\
+	common/json_parse.o			\
+	common/json_parse_simple.o		\
+	common/json_filter.o			\
 	common/json_stream.o			\
-	common/json_tok.o			\
 	common/lease_rates.o			\
 	common/memleak.o			\
 	common/node_id.o			\
-	common/param.o				\
 	common/psbt_open.o			\
 	common/pseudorand.o			\
 	common/random_select.o			\
+	common/scb_wiregen.o			\
 	common/setup.o				\
 	common/status_levels.o			\
 	common/type_to_string.o			\
@@ -142,35 +162,46 @@ PLUGIN_COMMON_OBJS :=				\
 	wire/tlvstream.o			\
 	wire/towire.o
 
+include plugins/bkpr/Makefile
+
+# Make sure these depend on everything.
+ALL_C_SOURCES += $(PLUGIN_ALL_SRC)
+ALL_C_HEADERS += $(PLUGIN_ALL_HEADER)
+ALL_PROGRAMS += $(C_PLUGINS)
+
 # Make all plugins depend on all plugin headers, for simplicity.
 $(PLUGIN_ALL_OBJS): $(PLUGIN_ALL_HEADER)
 
-plugins/pay: bitcoin/chainparams.o $(PLUGIN_PAY_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_PAY_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS) $(CCAN_OBJS) common/gossmap.o common/fp16.o common/route.o common/dijkstra.o common/bolt12.o common/bolt12_merkle.o wire/bolt12$(EXP)_wiregen.o bitcoin/block.o
+plugins/pay: $(PLUGIN_PAY_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_PAY_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS) common/gossmap.o common/fp16.o common/route.o common/dijkstra.o common/bolt12.o common/bolt12_merkle.o wire/bolt12$(EXP)_wiregen.o bitcoin/block.o common/blindedpay.o common/blindedpath.o common/hmac.o common/blinding.o common/onion_encode.o
 
-plugins/autoclean: bitcoin/chainparams.o $(PLUGIN_AUTOCLEAN_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS) $(CCAN_OBJS)
+plugins/autoclean: $(PLUGIN_AUTOCLEAN_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS)
+
+plugins/chanbackup: $(PLUGIN_chanbackup_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS)
+
+plugins/commando: $(PLUGIN_COMMANDO_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS) 
 
 # Topology wants to decode node_announcement, and peer_wiregen which
 # pulls in some of bitcoin/.
-plugins/topology: common/route.o common/dijkstra.o common/gossmap.o common/fp16.o bitcoin/chainparams.o wire/peer$(EXP)_wiregen.o wire/channel_type_wiregen.o bitcoin/block.o bitcoin/preimage.o  $(PLUGIN_TOPOLOGY_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS) $(CCAN_OBJS)
+plugins/topology: common/route.o common/dijkstra.o common/gossmap.o common/fp16.o wire/peer$(EXP)_wiregen.o wire/channel_type_wiregen.o bitcoin/block.o bitcoin/preimage.o  $(PLUGIN_TOPOLOGY_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS)
 
-plugins/txprepare: bitcoin/chainparams.o $(PLUGIN_TXPREPARE_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS) $(CCAN_OBJS)
+plugins/txprepare: $(PLUGIN_TXPREPARE_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS)
 
-plugins/bcli: bitcoin/chainparams.o $(PLUGIN_BCLI_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS) $(CCAN_OBJS)
+plugins/bcli: $(PLUGIN_BCLI_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS)
 
-plugins/keysend: bitcoin/chainparams.o wire/tlvstream.o wire/onion$(EXP)_wiregen.o $(PLUGIN_KEYSEND_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_PAY_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS) $(CCAN_OBJS) common/gossmap.o common/fp16.o common/route.o common/dijkstra.o
+plugins/keysend: wire/tlvstream.o wire/onion$(EXP)_wiregen.o $(PLUGIN_KEYSEND_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_PAY_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS) common/gossmap.o common/fp16.o common/route.o common/dijkstra.o common/blindedpay.o common/blindedpath.o common/hmac.o common/blinding.o common/onion_encode.o
 $(PLUGIN_KEYSEND_OBJS): $(PLUGIN_PAY_LIB_HEADER)
 
-plugins/spenderp: bitcoin/block.o bitcoin/chainparams.o bitcoin/preimage.o bitcoin/psbt.o common/psbt_open.o wire/peer${EXP}_wiregen.o $(PLUGIN_SPENDER_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS) $(CCAN_OBJS)
+plugins/spenderp: bitcoin/block.o bitcoin/preimage.o bitcoin/psbt.o common/psbt_open.o wire/peer${EXP}_wiregen.o $(PLUGIN_SPENDER_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS)
 
-plugins/offers: bitcoin/chainparams.o $(PLUGIN_OFFERS_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) common/bolt12.o common/bolt12_merkle.o common/bolt11_json.o common/iso4217.o $(WIRE_OBJS) bitcoin/block.o common/channel_id.o bitcoin/preimage.o $(JSMN_OBJS) $(CCAN_OBJS)
+plugins/offers: $(PLUGIN_OFFERS_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) common/bolt12.o common/bolt12_merkle.o common/bolt11_json.o common/iso4217.o $(WIRE_OBJS) $(WIRE_BOLT12_OBJS) bitcoin/block.o common/channel_id.o bitcoin/preimage.o common/blindedpath.o common/invoice_path_id.o common/blinding.o common/hmac.o $(JSMN_OBJS)
 
-plugins/fetchinvoice: bitcoin/chainparams.o $(PLUGIN_FETCHINVOICE_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) common/bolt12.o common/bolt12_merkle.o common/iso4217.o $(WIRE_OBJS) bitcoin/block.o common/channel_id.o bitcoin/preimage.o $(JSMN_OBJS) $(CCAN_OBJS) common/gossmap.o common/fp16.o common/dijkstra.o common/route.o common/blindedpath.o common/hmac.o common/blinding.o
+plugins/fetchinvoice: $(PLUGIN_FETCHINVOICE_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) common/bolt12.o common/bolt12_merkle.o common/iso4217.o $(WIRE_OBJS) $(WIRE_BOLT12_OBJS) bitcoin/block.o common/channel_id.o bitcoin/preimage.o $(JSMN_OBJS) common/gossmap.o common/fp16.o common/dijkstra.o common/route.o common/blindedpath.o common/hmac.o common/blinding.o
 
-plugins/funder: bitcoin/chainparams.o bitcoin/psbt.o common/psbt_open.o $(PLUGIN_FUNDER_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS) $(CCAN_OBJS)
+plugins/funder: bitcoin/psbt.o common/psbt_open.o $(PLUGIN_FUNDER_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS)
 
 # Generated from PLUGINS definition in plugins/Makefile
 ALL_C_HEADERS += plugins/list_of_builtin_plugins_gen.h
-plugins/list_of_builtin_plugins_gen.h: plugins/Makefile Makefile
+plugins/list_of_builtin_plugins_gen.h: plugins/Makefile Makefile config.vars
 	@$(call VERBOSE,GEN $@,echo "static const char *list_of_builtin_plugins[] = { $(foreach d,$(notdir $(PLUGINS)),\"$d\",) NULL };" > $@)
 
 CLN_PLUGIN_EXAMPLES := target/${RUST_PROFILE}/examples/cln-plugin-startup
@@ -179,8 +210,11 @@ CLN_PLUGIN_SRC = $(shell find plugins/src -name "*.rs")
 ${CLN_PLUGIN_EXAMPLES}: ${CLN_PLUGIN_SRC}
 	(cd plugins; cargo build ${CARGO_OPTS} --examples)
 
+target/${RUST_PROFILE}/cln-grpc: ${CLN_PLUGIN_SRC}
+	cargo build ${CARGO_OPTS} --bin cln-grpc
+
 ifneq ($(RUST),0)
-DEFAULT_TARGETS += $(CLN_PLUGIN_EXAMPLES)
+DEFAULT_TARGETS += $(CLN_PLUGIN_EXAMPLES) plugins/cln-grpc
 endif
 
 include plugins/test/Makefile

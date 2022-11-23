@@ -51,6 +51,8 @@ class Sqlite3Rewriter(Rewriter):
             r'decode\((.*),\s*[\'\"]hex[\'\"]\)': 'x\\1',
             # GREATEST() of multiple columns is simple MAX in sqlite3.
             r'GREATEST\(([^)]*)\)': "MAX(\\1)",
+            # NULLS FIRST is default behavior on sqlite, make it disappear
+            r' NULLS FIRST': '',
         }
         return self.rewrite_types(query, typemapping)
 
@@ -110,7 +112,7 @@ def colname_htable(query):
     for colnum, colname in enumerate(colnames):
         colname = colname.strip()
         # SELECT xxx AS yyy -> Y
-        as_clause = colname.upper().find(" AS ")
+        as_clause = colname.upper().rfind(" AS ")
         if as_clause != -1:
             colname = colname[as_clause + 4:].strip()
 

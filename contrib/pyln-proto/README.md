@@ -15,13 +15,13 @@ pip install pyln-proto
 ```
 
 Alternatively you can also install the development version to get access to
-currently unreleased features by checking out the c-lightning source code and
+currently unreleased features by checking out the Core Lightning source code and
 installing into your python3 environment:
 
 ```bash
 git clone https://github.com/ElementsProject/lightning.git
 cd lightning/contrib/pyln-proto
-python3 setup.py develop
+poetry install
 ```
 
 This will add links to the library into your environment so changing the

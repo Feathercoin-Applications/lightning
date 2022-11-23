@@ -6,7 +6,7 @@ SYNOPSIS
 
 **(WARNING: experimental-offers only)**
 
-**offer** *amount* *description* [*issuer*] [*label*] [*quantity_min*] [*quantity_max*] [*absolute_expiry*] [*recurrence*] [*recurrence_base*] [*recurrence_paywindow*] [*recurrence_limit*] [*single_use*]
+**offer** *amount* *description* [*issuer*] [*label*] [*quantity_max*] [*absolute_expiry*] [*recurrence*] [*recurrence_base*] [*recurrence_paywindow*] [*recurrence_limit*] [*single_use*]
 
 DESCRIPTION
 -----------
@@ -43,10 +43,11 @@ reflects who is issuing this offer (i.e. you) if appropriate.
 The *label* field is an internal-use name for the offer, which can
 be any UTF-8 string.
 
-The present of *quantity_min* or *quantity_max* indicates that the
-invoice can specify more than one of the items within this (inclusive)
-range.  The *amount* for the invoice will need to be multiplied
-accordingly.  These are encoded in the offer.
+The presence of *quantity_max* indicates that the
+invoice can specify more than one of the items up (and including)
+this maximum: 0 is a special value meaning "no maximuim".
+The *amount* for the invoice will need to be multiplied
+accordingly.  This is encoded in the offer.
 
 The *absolute_expiry* is optionally the time the offer is valid until,
 in seconds since the first day of 1970 UTC.  If not set, the offer
@@ -96,11 +97,11 @@ RETURN VALUE
 
 [comment]: # (GENERATE-FROM-SCHEMA-START)
 On success, an object is returned, containing:
-- **offer_id** (hex): the id of this offer (merkle hash of non-signature fields) (always 64 characters)
+
+- **offer\_id** (hex): the id of this offer (merkle hash of non-signature fields) (always 64 characters)
 - **active** (boolean): whether this can still be used (always *true*)
-- **single_use** (boolean): whether this expires as soon as it's paid (reflects the *single_use* parameter)
+- **single\_use** (boolean): whether this expires as soon as it's paid (reflects the *single_use* parameter)
 - **bolt12** (string): the bolt12 encoding of the offer
-- **bolt12_unsigned** (string): the bolt12 encoding of the offer, without a signature
 - **used** (boolean): True if an associated invoice has been paid
 - **created** (boolean): false if the offer already existed
 - **label** (string, optional): the (optional) user-specified label
@@ -134,4 +135,4 @@ RESOURCES
 
 Main web site: <https://github.com/ElementsProject/lightning>
 
-[comment]: # ( SHA256STAMP:4bbcec9c30f77239db780945965ad5cccf702365c3e592921fac57ed6bfd080f)
+[comment]: # ( SHA256STAMP:217af2aae777229992e2ee07c6f8040d4ca5b75ee2064590584de13162974fe2)

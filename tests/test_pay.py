@@ -1,14 +1,12 @@
-from binascii import hexlify
 from fixtures import *  # noqa: F401,F403
 from fixtures import TEST_NETWORK
-from flaky import flaky  # noqa: F401
 from io import BytesIO
 from pyln.client import RpcError, Millisatoshi
 from pyln.proto.onion import TlvPayload
-from pyln.testing.utils import EXPERIMENTAL_DUAL_FUND, FUNDAMOUNT
+from pyln.testing.utils import EXPERIMENTAL_DUAL_FUND, FUNDAMOUNT, scid_to_int
 from utils import (
     DEVELOPER, wait_for, only_one, sync_blockheight, TIMEOUT,
-    EXPERIMENTAL_FEATURES, env, VALGRIND, mine_funding_to_announce
+    EXPERIMENTAL_FEATURES, VALGRIND, mine_funding_to_announce, first_scid
 )
 import copy
 import os
@@ -30,11 +28,11 @@ def test_pay(node_factory):
 
     inv = l2.rpc.invoice(123000, 'test_pay', 'description')['bolt11']
     before = int(time.time())
-    details = l1.rpc.dev_pay(inv, use_shadow=False)
+    details = l1.dev_pay(inv, use_shadow=False)
     after = time.time()
     preimage = details['payment_preimage']
     assert details['status'] == 'complete'
-    assert details['msatoshi'] == 123000
+    assert details['amount_msat'] == Millisatoshi(123000)
     assert details['destination'] == l2.info['id']
     assert details['created_at'] >= before
     assert details['created_at'] <= after
@@ -45,7 +43,7 @@ def test_pay(node_factory):
     assert invoice['status'] == 'paid' and invoice['paid_at'] >= before and invoice['paid_at'] <= after
 
     # Repeat payments are NOPs (if valid): we can hand null.
-    l1.rpc.dev_pay(inv, use_shadow=False)
+    l1.dev_pay(inv, use_shadow=False)
     # This won't work: can't provide an amount (even if correct!)
     with pytest.raises(RpcError):
         l1.rpc.pay(inv, 123000)
@@ -63,7 +61,7 @@ def test_pay(node_factory):
         # Must provide an amount!
         with pytest.raises(RpcError):
             l1.rpc.pay(inv2)
-        l1.rpc.dev_pay(inv2, random.randint(1000, 999999), use_shadow=False)
+        l1.dev_pay(inv2, random.randint(1000, 999999), use_shadow=False)
 
     # Should see 6 completed payments
     assert len(l1.rpc.listsendpays()['payments']) == 6
@@ -71,6 +69,16 @@ def test_pay(node_factory):
     # Test listsendpays indexed by bolt11.
     payments = l1.rpc.listsendpays(inv)['payments']
     assert len(payments) == 1 and payments[0]['payment_preimage'] == preimage
+
+    # Check channels apy summary view of channel activity
+    apys_1 = l1.rpc.bkpr_channelsapy()['channels_apy']
+    apys_2 = l2.rpc.bkpr_channelsapy()['channels_apy']
+
+    assert apys_1[0]['channel_start_balance_msat'] == apys_2[0]['channel_start_balance_msat']
+    assert apys_1[0]['channel_start_balance_msat'] == apys_1[0]['our_start_balance_msat']
+    assert apys_2[0]['our_start_balance_msat'] == Millisatoshi(0)
+    assert apys_1[0]['routed_out_msat'] == apys_2[0]['routed_in_msat']
+    assert apys_1[0]['routed_in_msat'] == apys_2[0]['routed_out_msat']
 
 
 @pytest.mark.developer("needs to deactivate shadow routing")
@@ -83,7 +91,7 @@ def test_pay_amounts(node_factory):
     assert isinstance(invoice['amount_msat'], Millisatoshi)
     assert invoice['amount_msat'] == Millisatoshi(123000)
 
-    l1.rpc.dev_pay(inv, use_shadow=False)
+    l1.dev_pay(inv, use_shadow=False)
 
     invoice = only_one(l2.rpc.listinvoices('test_pay_amounts')['invoices'])
     assert isinstance(invoice['amount_received_msat'], Millisatoshi)
@@ -91,7 +99,7 @@ def test_pay_amounts(node_factory):
 
 
 @pytest.mark.developer("needs to deactivate shadow routing")
-def test_pay_limits(node_factory, compat):
+def test_pay_limits(node_factory):
     """Test that we enforce fee max percentage and max delay"""
     l1, l2, l3 = node_factory.line_graph(3, wait_for_announce=True)
 
@@ -103,7 +111,7 @@ def test_pay_limits(node_factory, compat):
     # Fee too high.
     err = r'Fee exceeds our fee budget: [1-9]msat > 0msat, discarding route'
     with pytest.raises(RpcError, match=err) as err:
-        l1.rpc.call('pay', {'bolt11': inv['bolt11'], 'msatoshi': 100000, 'maxfeepercent': 0.0001, 'exemptfee': 0})
+        l1.rpc.call('pay', {'bolt11': inv['bolt11'], 'amount_msat': 100000, 'maxfeepercent': 0.0001, 'exemptfee': 0})
 
     assert err.value.error['code'] == PAY_STOPPED_RETRYING
 
@@ -120,7 +128,7 @@ def test_pay_limits(node_factory, compat):
     failmsg = r'CLTV delay exceeds our CLTV budget'
     # Delay too high.
     with pytest.raises(RpcError, match=failmsg) as err:
-        l1.rpc.call('pay', {'bolt11': inv['bolt11'], 'msatoshi': 100000, 'maxdelay': 0})
+        l1.rpc.call('pay', {'bolt11': inv['bolt11'], 'amount_msat': 100000, 'maxdelay': 0})
 
     assert err.value.error['code'] == PAY_STOPPED_RETRYING
     # Should also have retried two more times.
@@ -129,10 +137,15 @@ def test_pay_limits(node_factory, compat):
     assert(len(status) == 2)
     assert(status[0]['failure']['code'] == 205)
 
+    # This fails!
+    err = r'Fee exceeds our fee budget: 2msat > 1msat, discarding route'
+    with pytest.raises(RpcError, match=err) as err:
+        l1.rpc.pay(bolt11=inv['bolt11'], amount_msat=100000, maxfee=1)
+
     # This works, because fee is less than exemptfee.
-    l1.rpc.dev_pay(inv['bolt11'], msatoshi=100000, maxfeepercent=0.0001,
-                   exemptfee=2000, use_shadow=False)
-    status = l1.rpc.call('paystatus', {'bolt11': inv['bolt11']})['pay'][2]['attempts']
+    l1.dev_pay(inv['bolt11'], amount_msat=100000, maxfeepercent=0.0001,
+               exemptfee=2000, use_shadow=False)
+    status = l1.rpc.call('paystatus', {'bolt11': inv['bolt11']})['pay'][3]['attempts']
     assert len(status) == 1
     assert status[0]['strategy'] == "Initial attempt"
 
@@ -222,7 +235,7 @@ def test_pay0(node_factory):
     rhash = inv['payment_hash']
 
     routestep = {
-        'msatoshi': 0,
+        'amount_msat': 0,
         'id': l2.info['id'],
         'delay': 10,
         'channel': chanid
@@ -253,7 +266,8 @@ def test_pay_disconnect(node_factory, bitcoind):
     route = l1.rpc.getroute(l2.info['id'], 123000, 1)["route"]
 
     l2.stop()
-    wait_for(lambda: only_one(l1.rpc.listpeers(l2.info['id'])['peers'])['connected'] is False)
+    # Make sure channeld has exited!
+    wait_for(lambda: 'owner' not in only_one(only_one(l1.rpc.listpeers(l2.info['id'])['peers'])['channels']))
 
     # Can't pay while its offline.
     with pytest.raises(RpcError, match=r'failed: WIRE_TEMPORARY_CHANNEL_FAILURE \(First peer not ready\)'):
@@ -313,18 +327,51 @@ def test_pay_get_error_with_update(node_factory):
     wait_for(lambda: not l1.is_channel_active(chanid2))
 
 
+@pytest.mark.developer("needs DEVELOPER=1 for dev_suppress_gossip, dev-routes")
+def test_pay_error_update_fees(node_factory):
+    """We should process an update inside a temporary_channel_failure"""
+    l1, l2, l3 = node_factory.line_graph(3, fundchannel=True, wait_for_announce=True)
+
+    # Don't include any routehints in first invoice.
+    inv1 = l3.dev_invoice(amount_msat=123000,
+                          label='test_pay_error_update_fees',
+                          description='description',
+                          dev_routes=[])
+
+    inv2 = l3.rpc.invoice(123000, 'test_pay_error_update_fees2', 'desc')  # noqa: F841
+
+    # Make sure l2 doesn't tell l1 directly that channel fee is changed.
+    l2.rpc.dev_suppress_gossip()
+    l2.rpc.setchannel(l3.info['id'], 1337, 137, enforcedelay=0)
+
+    # Should bounce off and retry...
+    l1.rpc.pay(inv1['bolt11'])
+    attempts = only_one(l1.rpc.paystatus(inv1['bolt11'])['pay'])['attempts']
+    assert len(attempts) == 2
+    # WIRE_FEE_INSUFFICIENT = UPDATE|12
+    assert attempts[0]['failure']['data']['failcode'] == 4108
+
+    # FIXME: We *DO NOT* handle misleading routehints!
+    # # Should ignore old routehint and do the same...
+    # l1.rpc.pay(inv2['bolt11'])
+    # attempts = only_one(l1.rpc.paystatus(inv2['bolt11'])['pay'])['attempts']
+    # assert len(attempts) == 2
+    # # WIRE_FEE_INSUFFICIENT = UPDATE|12
+    # assert attempts[0]['failure']['data']['failcode'] == 4108
+
+
 @pytest.mark.developer("needs to deactivate shadow routing")
-def test_pay_optional_args(node_factory, compat):
+def test_pay_optional_args(node_factory):
     l1, l2 = node_factory.line_graph(2)
 
     inv1 = l2.rpc.invoice(123000, 'test_pay', 'desc')['bolt11']
-    l1.rpc.dev_pay(inv1, label='desc', use_shadow=False)
+    l1.dev_pay(inv1, label='desc', use_shadow=False)
     payment1 = l1.rpc.listsendpays(inv1)['payments']
-    assert len(payment1) and payment1[0]['msatoshi_sent'] == 123000
+    assert len(payment1) and payment1[0]['amount_sent_msat'] == 123000
     assert payment1[0]['label'] == 'desc'
 
     inv2 = l2.rpc.invoice(321000, 'test_pay2', 'description')['bolt11']
-    l1.rpc.dev_pay(inv2, riskfactor=5.0, use_shadow=False)
+    l1.dev_pay(inv2, riskfactor=5.0, use_shadow=False)
     payment2 = l1.rpc.listsendpays(inv2)['payments']
     assert(len(payment2) == 1)
     # The pay plugin uses `sendonion` since 0.9.0 and `lightningd` doesn't
@@ -332,7 +379,7 @@ def test_pay_optional_args(node_factory, compat):
     # root of a payment tree with the bolt11 invoice).
 
     anyinv = l2.rpc.invoice('any', 'any_pay', 'desc')['bolt11']
-    l1.rpc.dev_pay(anyinv, label='desc', msatoshi='500', use_shadow=False)
+    l1.dev_pay(anyinv, label='desc', amount_msat=500, use_shadow=False)
     payment3 = l1.rpc.listsendpays(anyinv)['payments']
     assert len(payment3) == 1
     assert payment3[0]['label'] == 'desc'
@@ -365,7 +412,7 @@ def test_payment_success_persistence(node_factory, bitcoind, executor):
     inv1 = l2.rpc.invoice(1000, 'inv1', 'inv1')
 
     # Fire off a pay request, it'll get interrupted by a restart
-    executor.submit(l1.rpc.dev_pay, inv1['bolt11'], use_shadow=False)
+    executor.submit(l1.dev_pay, inv1['bolt11'], use_shadow=False)
 
     l1.daemon.wait_for_log(r'dev_disconnect: \+WIRE_COMMITMENT_SIGNED')
 
@@ -389,8 +436,10 @@ def test_payment_success_persistence(node_factory, bitcoind, executor):
     l1.wait_channel_active(chanid)
 
     # A duplicate should succeed immediately (nop) and return correct preimage.
-    preimage = l1.rpc.dev_pay(inv1['bolt11'],
-                              use_shadow=False)['payment_preimage']
+    preimage = l1.dev_pay(
+        inv1['bolt11'],
+        use_shadow=False
+    )['payment_preimage']
     assert l1.rpc.dev_rhash(preimage)['rhash'] == inv1['payment_hash']
 
 
@@ -505,7 +554,7 @@ def test_pay_maxfee_shadow(node_factory):
         # maxfeepercent.
         amount = 20000
         bolt11 = l2.rpc.invoice(amount, "big.{}".format(i), "bigger")["bolt11"]
-        pay_status = l1.rpc.pay(bolt11, maxfeepercent="0.000001")
+        pay_status = l1.rpc.pay(bolt11, maxfeepercent=0.001)
         assert pay_status["amount_msat"] == Millisatoshi(amount)
 
 
@@ -521,16 +570,16 @@ def test_sendpay(node_factory):
         return len(invoices) == 1 and invoices[0]['status'] == 'unpaid'
 
     routestep = {
-        'msatoshi': amt,
+        'amount_msat': amt,
         'id': l2.info['id'],
         'delay': 5,
-        'channel': '1x1x1'
+        'channel': first_scid(l1, l2)
     }
 
     # Insufficient funds.
     with pytest.raises(RpcError):
         rs = copy.deepcopy(routestep)
-        rs['msatoshi'] = rs['msatoshi'] - 1
+        rs['amount_msat'] = rs['amount_msat'] - 1
         l1.rpc.sendpay([rs], rhash, payment_secret=inv['payment_secret'])
         l1.rpc.waitsendpay(rhash)
     assert invoice_unpaid(l2, 'testpayment2')
@@ -538,7 +587,7 @@ def test_sendpay(node_factory):
     # Gross overpayment (more than factor of 2)
     with pytest.raises(RpcError):
         rs = copy.deepcopy(routestep)
-        rs['msatoshi'] = rs['msatoshi'] * 2 + 1
+        rs['amount_msat'] = rs['amount_msat'] * 2 + 1
         l1.rpc.sendpay([rs], rhash, payment_secret=inv['payment_secret'])
         l1.rpc.waitsendpay(rhash)
     assert invoice_unpaid(l2, 'testpayment2')
@@ -552,11 +601,13 @@ def test_sendpay(node_factory):
     assert invoice_unpaid(l2, 'testpayment2')
 
     # Bad ID.
+    l1.rpc.check_request_schemas = False
     with pytest.raises(RpcError):
         rs = copy.deepcopy(routestep)
         rs['id'] = '00000000000000000000000000000000'
         l1.rpc.sendpay([rs], rhash, payment_secret=inv['payment_secret'])
     assert invoice_unpaid(l2, 'testpayment2')
+    l1.rpc.check_request_schemas = True
 
     # Bad payment_secret
     l1.rpc.sendpay([routestep], rhash, payment_secret="00" * 32)
@@ -573,10 +624,10 @@ def test_sendpay(node_factory):
     # FIXME: test paying via another node, should fail to pay twice.
     p1 = l1.rpc.getpeer(l2.info['id'], 'info')
     p2 = l2.rpc.getpeer(l1.info['id'], 'info')
-    assert only_one(p1['channels'])['msatoshi_to_us'] == 10**6 * 1000
-    assert only_one(p1['channels'])['msatoshi_total'] == 10**6 * 1000
-    assert only_one(p2['channels'])['msatoshi_to_us'] == 0
-    assert only_one(p2['channels'])['msatoshi_total'] == 10**6 * 1000
+    assert only_one(p1['channels'])['to_us_msat'] == 10**6 * 1000
+    assert only_one(p1['channels'])['total_msat'] == 10**6 * 1000
+    assert only_one(p2['channels'])['to_us_msat'] == 0
+    assert only_one(p2['channels'])['total_msat'] == 10**6 * 1000
 
     # This works.
     before = int(time.time())
@@ -586,13 +637,13 @@ def test_sendpay(node_factory):
     # Check details
     assert details['payment_hash'] == rhash
     assert details['destination'] == l2.info['id']
-    assert details['msatoshi'] == amt
+    assert details['amount_msat'] == amt
     assert details['created_at'] >= before
     assert details['created_at'] <= after
     # Check receiver
     assert only_one(l2.rpc.listinvoices('testpayment2')['invoices'])['status'] == 'paid'
     assert only_one(l2.rpc.listinvoices('testpayment2')['invoices'])['pay_index'] == 1
-    assert only_one(l2.rpc.listinvoices('testpayment2')['invoices'])['msatoshi_received'] == rs['msatoshi']
+    assert only_one(l2.rpc.listinvoices('testpayment2')['invoices'])['amount_received_msat'] == rs['amount_msat']
     assert only_one(l2.rpc.listinvoices('testpayment2')['invoices'])['payment_preimage'] == preimage
 
     # Balances should reflect it.
@@ -600,10 +651,10 @@ def test_sendpay(node_factory):
         p1 = l1.rpc.getpeer(l2.info['id'], 'info')
         p2 = l2.rpc.getpeer(l1.info['id'], 'info')
         return (
-            only_one(p1['channels'])['msatoshi_to_us'] == 10**6 * 1000 - amt
-            and only_one(p1['channels'])['msatoshi_total'] == 10**6 * 1000
-            and only_one(p2['channels'])['msatoshi_to_us'] == amt
-            and only_one(p2['channels'])['msatoshi_total'] == 10**6 * 1000
+            only_one(p1['channels'])['to_us_msat'] == 10**6 * 1000 - amt
+            and only_one(p1['channels'])['total_msat'] == 10**6 * 1000
+            and only_one(p2['channels'])['to_us_msat'] == amt
+            and only_one(p2['channels'])['total_msat'] == 10**6 * 1000
         )
     wait_for(check_balances)
 
@@ -615,17 +666,17 @@ def test_sendpay(node_factory):
     assert preimage == preimage2
     l1.daemon.wait_for_log('Payment ./.: .* COMPLETE')
     assert only_one(l2.rpc.listinvoices('testpayment2')['invoices'])['status'] == 'paid'
-    assert only_one(l2.rpc.listinvoices('testpayment2')['invoices'])['msatoshi_received'] == rs['msatoshi']
+    assert only_one(l2.rpc.listinvoices('testpayment2')['invoices'])['amount_received_msat'] == rs['amount_msat']
 
     # Overpaying by "only" a factor of 2 succeeds.
     inv = l2.rpc.invoice(amt, 'testpayment3', 'desc')
     rhash = inv['payment_hash']
     assert only_one(l2.rpc.listinvoices('testpayment3')['invoices'])['status'] == 'unpaid'
-    routestep = {'msatoshi': amt * 2, 'id': l2.info['id'], 'delay': 5, 'channel': '1x1x1'}
+    routestep = {'amount_msat': amt * 2, 'id': l2.info['id'], 'delay': 5, 'channel': first_scid(l1, l2)}
     l1.rpc.sendpay([routestep], rhash, payment_secret=inv['payment_secret'])
     preimage3 = l1.rpc.waitsendpay(rhash)['payment_preimage']
     assert only_one(l2.rpc.listinvoices('testpayment3')['invoices'])['status'] == 'paid'
-    assert only_one(l2.rpc.listinvoices('testpayment3')['invoices'])['msatoshi_received'] == amt * 2
+    assert only_one(l2.rpc.listinvoices('testpayment3')['invoices'])['amount_received_msat'] == amt * 2
 
     # Test listsendpays
     payments = l1.rpc.listsendpays()['payments']
@@ -756,7 +807,6 @@ def test_decodepay(node_factory):
         'fj9srp'
     )
     assert b11['currency'] == 'bc'
-    assert b11['msatoshi'] == 2500 * 10**11 // 1000000
     assert b11['amount_msat'] == Millisatoshi(2500 * 10**11 // 1000000)
     assert b11['created_at'] == 1496314658
     assert b11['payment_hash'] == '0001020304050607080900010203040506070809000102030405060708090102'
@@ -790,7 +840,6 @@ def test_decodepay(node_factory):
         'herry pie, one sausage, one cupcake, and one slice of watermelon'
     )
     assert b11['currency'] == 'bc'
-    assert b11['msatoshi'] == 20 * 10**11 // 1000
     assert b11['amount_msat'] == Millisatoshi(str(20 * 10**11 // 1000) + 'msat')
     assert b11['created_at'] == 1496314658
     assert b11['payment_hash'] == '0001020304050607080900010203040506070809000102030405060708090102'
@@ -823,7 +872,6 @@ def test_decodepay(node_factory):
         'herry pie, one sausage, one cupcake, and one slice of watermelon'
     )
     assert b11['currency'] == 'tb'
-    assert b11['msatoshi'] == 20 * 10**11 // 1000
     assert b11['amount_msat'] == Millisatoshi(20 * 10**11 // 1000)
     assert b11['created_at'] == 1496314658
     assert b11['payment_hash'] == '0001020304050607080900010203040506070809000102030405060708090102'
@@ -855,7 +903,6 @@ def test_decodepay(node_factory):
     # * `dhhwkj`: Bech32 checksum
     b11 = l1.rpc.decodepay('lnbc20m1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqhp58yjmdan79s6qqdhdzgynm4zwqd5d7xmw5fk98klysy043l2ahrqsfpp3qjmp7lwpagxun9pygexvgpjdc4jdj85fr9yq20q82gphp2nflc7jtzrcazrra7wwgzxqc8u7754cdlpfrmccae92qgzqvzq2ps8pqqqqqqpqqqqq9qqqvpeuqafqxu92d8lr6fvg0r5gv0heeeqgcrqlnm6jhphu9y00rrhy4grqszsvpcgpy9qqqqqqgqqqqq7qqzqj9n4evl6mr5aj9f58zp6fyjzup6ywn3x6sk8akg5v4tgn2q8g4fhx05wf6juaxu9760yp46454gpg5mtzgerlzezqcqvjnhjh8z3g2qqdhhwkj', 'One piece of chocolate cake, one icecream cone, one pickle, one slice of swiss cheese, one slice of salami, one lollypop, one piece of cherry pie, one sausage, one cupcake, and one slice of watermelon')
     assert b11['currency'] == 'bc'
-    assert b11['msatoshi'] == 20 * 10**11 // 1000
     assert b11['amount_msat'] == Millisatoshi(20 * 10**11 // 1000)
     assert b11['created_at'] == 1496314658
     assert b11['payment_hash'] == '0001020304050607080900010203040506070809000102030405060708090102'
@@ -898,7 +945,6 @@ def test_decodepay(node_factory):
     # * `mf9swh`: Bech32 checksum
     b11 = l1.rpc.decodepay('lnbc20m1pvjluezhp58yjmdan79s6qqdhdzgynm4zwqd5d7xmw5fk98klysy043l2ahrqspp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqfppj3a24vwu6r8ejrss3axul8rxldph2q7z9kmrgvr7xlaqm47apw3d48zm203kzcq357a4ls9al2ea73r8jcceyjtya6fu5wzzpe50zrge6ulk4nvjcpxlekvmxl6qcs9j3tz0469gq5g658y', 'One piece of chocolate cake, one icecream cone, one pickle, one slice of swiss cheese, one slice of salami, one lollypop, one piece of cherry pie, one sausage, one cupcake, and one slice of watermelon')
     assert b11['currency'] == 'bc'
-    assert b11['msatoshi'] == 20 * 10**11 // 1000
     assert b11['amount_msat'] == Millisatoshi(20 * 10**11 // 1000)
     assert b11['created_at'] == 1496314658
     assert b11['payment_hash'] == '0001020304050607080900010203040506070809000102030405060708090102'
@@ -925,7 +971,6 @@ def test_decodepay(node_factory):
     # * `qdtpa4`: Bech32 checksum
     b11 = l1.rpc.decodepay('lnbc20m1pvjluezhp58yjmdan79s6qqdhdzgynm4zwqd5d7xmw5fk98klysy043l2ahrqspp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqfppqw508d6qejxtdg4y5r3zarvary0c5xw7kepvrhrm9s57hejg0p662ur5j5cr03890fa7k2pypgttmh4897d3raaq85a293e9jpuqwl0rnfuwzam7yr8e690nd2ypcq9hlkdwdvycqa0qza8', 'One piece of chocolate cake, one icecream cone, one pickle, one slice of swiss cheese, one slice of salami, one lollypop, one piece of cherry pie, one sausage, one cupcake, and one slice of watermelon')
     assert b11['currency'] == 'bc'
-    assert b11['msatoshi'] == 20 * 10**11 // 1000
     assert b11['amount_msat'] == Millisatoshi(20 * 10**11 // 1000)
     assert b11['created_at'] == 1496314658
     assert b11['payment_hash'] == '0001020304050607080900010203040506070809000102030405060708090102'
@@ -952,7 +997,6 @@ def test_decodepay(node_factory):
     # * `akvd7y`: Bech32 checksum
     b11 = l1.rpc.decodepay('lnbc20m1pvjluezhp58yjmdan79s6qqdhdzgynm4zwqd5d7xmw5fk98klysy043l2ahrqspp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqfp4qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q28j0v3rwgy9pvjnd48ee2pl8xrpxysd5g44td63g6xcjcu003j3qe8878hluqlvl3km8rm92f5stamd3jw763n3hck0ct7p8wwj463cql26ava', 'One piece of chocolate cake, one icecream cone, one pickle, one slice of swiss cheese, one slice of salami, one lollypop, one piece of cherry pie, one sausage, one cupcake, and one slice of watermelon')
     assert b11['currency'] == 'bc'
-    assert b11['msatoshi'] == 20 * 10**11 // 1000
     assert b11['amount_msat'] == Millisatoshi(20 * 10**11 // 1000)
     assert b11['created_at'] == 1496314658
     assert b11['payment_hash'] == '0001020304050607080900010203040506070809000102030405060708090102'
@@ -982,7 +1026,6 @@ def test_decodepay(node_factory):
     # * `73t7cl`: Bech32 checksum
     b11 = l1.rpc.decodepay('lnbc25m1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdq5vdhkven9v5sxyetpdees9qzsze992adudgku8p05pstl6zh7av6rx2f297pv89gu5q93a0hf3g7lynl3xq56t23dpvah6u7y9qey9lccrdml3gaqwc6nxsl5ktzm464sq73t7cl')
     assert b11['currency'] == 'bc'
-    assert b11['msatoshi'] == 25 * 10**11 // 1000
     assert b11['amount_msat'] == Millisatoshi(25 * 10**11 // 1000)
     assert b11['created_at'] == 1496314658
     assert b11['payment_hash'] == '0001020304050607080900010203040506070809000102030405060708090102'
@@ -1022,7 +1065,7 @@ def test_decodepay(node_factory):
     b11 = "lnbcrt71p0g4u8upp5xn4k45tsp05akmn65s5k2063d5fyadhjse9770xz5sk7u4x6vcmqdqqcqzynxqrrssx94cf4p727jamncsvcd8m99n88k423ruzq4dxwevfatpp5gx2mksj2swshjlx4pe3j5w9yed5xjktrktzd3nc2a04kq8yu84l7twhwgpxjn3pw"
     b11 = l1.rpc.decodepay(b11)
     sat_per_btc = 10**8
-    assert(b11['msatoshi'] == 7 * sat_per_btc * 1000)
+    assert(b11['amount_msat'] == 7 * sat_per_btc * 1000)
 
     with pytest.raises(RpcError):
         l1.rpc.decodepay('1111111')
@@ -1049,11 +1092,11 @@ def test_forward(node_factory, bitcoind):
     amt = 100000000
     fee = amt * 10 // 1000000 + 1
 
-    baseroute = [{'msatoshi': amt + fee,
+    baseroute = [{'amount_msat': amt + fee,
                   'id': l2.info['id'],
                   'delay': 12,
                   'channel': chanid1},
-                 {'msatoshi': amt,
+                 {'amount_msat': amt,
                   'id': l3.info['id'],
                   'delay': 6,
                   'channel': chanid2}]
@@ -1083,6 +1126,15 @@ def test_forward(node_factory, bitcoind):
     route = copy.deepcopy(baseroute)
     l1.rpc.sendpay(route, rhash, payment_secret=inv['payment_secret'])
     l1.rpc.waitsendpay(rhash)
+
+    # Check that invoice payment and fee are tracked appropriately
+    l1.daemon.wait_for_log('coin_move .* [(]invoice[)]')
+    l1.rpc.bkpr_dumpincomecsv('koinly', 'koinly.csv')
+
+    koinly_path = os.path.join(l1.daemon.lightning_dir, TEST_NETWORK, 'koinly.csv')
+    koinly_csv = open(koinly_path, 'rb').read()
+    expected_line = r'0.00100000000,.*,,,0.00000001001,.*,invoice'
+    assert only_one(re.findall(expected_line, str(koinly_csv)))
 
 
 @pytest.mark.developer("needs --dev-fast-gossip")
@@ -1165,7 +1217,7 @@ def test_forward_different_fees_and_cltv(node_factory, bitcoind):
     #      * `amt_to_forward` = 4999999
     #      * `outgoing_cltv_value` = current-block-height + 9 + 42
     #
-    assert route[0]['msatoshi'] == 4999999
+    assert route[0]['amount_msat'] == 4999999
     assert route[0]['delay'] == 9 + shadow_route
 
     # BOLT #7:
@@ -1188,9 +1240,9 @@ def test_forward_different_fees_and_cltv(node_factory, bitcoind):
     route = l1.rpc.getroute(l3.info['id'], 4999999, 1)["route"]
     assert len(route) == 2
 
-    assert route[0]['msatoshi'] == 5010198
+    assert route[0]['amount_msat'] == 5010198
     assert route[0]['delay'] == 20 + 9 + shadow_route
-    assert route[1]['msatoshi'] == 4999999
+    assert route[1]['amount_msat'] == 4999999
     assert route[1]['delay'] == 9 + shadow_route
 
     inv = l3.rpc.invoice(4999999, 'test_forward_different_fees_and_cltv', 'desc')
@@ -1253,17 +1305,15 @@ def test_forward_pad_fees_and_cltv(node_factory, bitcoind):
     route = l1.rpc.getroute(l3.info['id'], 4999999, 1)["route"]
     assert len(route) == 2
 
-    assert route[0]['msatoshi'] == 5010198
+    assert route[0]['amount_msat'] == 5010198
     assert route[0]['delay'] == 20 + 9
-    assert route[1]['msatoshi'] == 4999999
+    assert route[1]['amount_msat'] == 4999999
     assert route[1]['delay'] == 9
 
     # Modify so we overpay, overdo the cltv.
-    route[0]['msatoshi'] += 2000
-    route[0]['amount_msat'] = Millisatoshi(route[0]['msatoshi'])
+    route[0]['amount_msat'] += 2000
     route[0]['delay'] += 20
-    route[1]['msatoshi'] += 1000
-    route[1]['amount_msat'] = Millisatoshi(route[1]['msatoshi'])
+    route[1]['amount_msat'] += 1000
     route[1]['delay'] += 10
 
     # This should work.
@@ -1272,6 +1322,26 @@ def test_forward_pad_fees_and_cltv(node_factory, bitcoind):
     l1.rpc.sendpay(route, rhash, payment_secret=inv['payment_secret'])
     l1.rpc.waitsendpay(rhash)
     assert only_one(l3.rpc.listinvoices('test_forward_pad_fees_and_cltv')['invoices'])['status'] == 'paid'
+
+    # Do some checks of the bookkeeper's records
+    def _income_tagset(node, tagset):
+        incomes = node.rpc.bkpr_listincome()['income_events']
+        return [e for e in incomes if e['tag'] in tagset]
+
+    tags = ['invoice', 'invoice_fee']
+    wait_for(lambda: len(_income_tagset(l1, tags)) == 2)
+    incomes = _income_tagset(l1, tags)
+    # the balance on l3 should equal the invoice
+    accts = l3.rpc.bkpr_listbalances()['accounts']
+    assert len(accts) == 2
+    wallet = accts[0]
+    chan_acct = accts[1]
+    assert wallet['account'] == 'wallet'
+    assert only_one(wallet['balances'])['balance_msat'] == Millisatoshi(0)
+    assert incomes[0]['tag'] == 'invoice'
+    assert only_one(chan_acct['balances'])['balance_msat'] == incomes[0]['debit_msat']
+    inve = only_one([e for e in l1.rpc.bkpr_listaccountevents()['events'] if e['tag'] == 'invoice'])
+    assert inve['debit_msat'] == incomes[0]['debit_msat'] + incomes[1]['debit_msat']
 
 
 @pytest.mark.developer("needs DEVELOPER=1 for dev_ignore_htlcs")
@@ -1320,7 +1390,7 @@ def test_forward_stats(node_factory, bitcoind):
     # Select all forwardings, ordered by htlc_id to ensure the order
     # matches below
     forwardings = l2.db_query("SELECT *, in_msatoshi - out_msatoshi as fee "
-                              "FROM forwarded_payments "
+                              "FROM forwards "
                               "ORDER BY in_htlc_id;")
     assert(len(forwardings) == 3)
     states = [f['state'] for f in forwardings]
@@ -1332,22 +1402,22 @@ def test_forward_stats(node_factory, bitcoind):
     # Check that we correctly account channel changes
     assert inchan['in_payments_offered'] == 3
     assert inchan['in_payments_fulfilled'] == 1
-    assert inchan['in_msatoshi_offered'] >= 3 * amount
-    assert inchan['in_msatoshi_fulfilled'] >= amount
+    assert inchan['in_offered_msat'] >= Millisatoshi(3 * amount)
+    assert inchan['in_fulfilled_msat'] >= Millisatoshi(amount)
 
     assert outchan['out_payments_offered'] == 1
     assert outchan['out_payments_fulfilled'] == 1
-    assert outchan['out_msatoshi_offered'] >= amount
-    assert outchan['out_msatoshi_offered'] == outchan['out_msatoshi_fulfilled']
+    assert outchan['out_offered_msat'] >= Millisatoshi(amount)
+    assert outchan['out_offered_msat'] == outchan['out_fulfilled_msat']
 
-    assert outchan['out_msatoshi_fulfilled'] < inchan['in_msatoshi_fulfilled']
+    assert outchan['out_fulfilled_msat'] < inchan['in_fulfilled_msat']
 
     stats = l2.rpc.listforwards()
 
     assert [f['status'] for f in stats['forwards']] == ['settled', 'failed', 'offered']
-    assert l2.rpc.getinfo()['msatoshi_fees_collected'] == 1 + amount // 100000
-    assert l1.rpc.getinfo()['msatoshi_fees_collected'] == 0
-    assert l3.rpc.getinfo()['msatoshi_fees_collected'] == 0
+    assert l2.rpc.getinfo()['fees_collected_msat'] == 1 + amount // 100000
+    assert l1.rpc.getinfo()['fees_collected_msat'] == 0
+    assert l3.rpc.getinfo()['fees_collected_msat'] == 0
     assert stats['forwards'][0]['received_time'] <= stats['forwards'][0]['resolved_time']
     assert stats['forwards'][1]['received_time'] <= stats['forwards'][1]['resolved_time']
     assert 'received_time' in stats['forwards'][2] and 'resolved_time' not in stats['forwards'][2]
@@ -1456,11 +1526,11 @@ def test_forward_local_failed_stats(node_factory, bitcoind, executor):
     payment_hash = inv['payment_hash']
     fee = amount * 10 // 1000000 + 1
 
-    route = [{'msatoshi': amount,
+    route = [{'amount_msat': amount,
               'id': l2.info['id'],
               'delay': 12,
               'channel': c12},
-             {'msatoshi': amount,
+             {'amount_msat': amount,
               'id': l4.info['id'],
               'delay': 6,
               'channel': c24}]
@@ -1482,11 +1552,11 @@ def test_forward_local_failed_stats(node_factory, bitcoind, executor):
     payment_hash = inv['payment_hash']
     fee = amount * 10 // 1000000 + 1
 
-    route = [{'msatoshi': amount + fee,
+    route = [{'amount_msat': amount + fee,
               'id': l2.info['id'],
               'delay': 12,
               'channel': c12},
-             {'msatoshi': amount,
+             {'amount_msat': amount,
               'id': l5.info['id'],
               'delay': 6,
               'channel': c25}]
@@ -1532,11 +1602,11 @@ def test_forward_local_failed_stats(node_factory, bitcoind, executor):
     fee = amount * 10 // 1000000 + 1
 
     # We underpay, so it fails.
-    route = [{'msatoshi': amount + fee - 1,
+    route = [{'amount_msat': amount + fee - 1,
               'id': l2.info['id'],
               'delay': 12,
               'channel': c12},
-             {'msatoshi': amount - 1,
+             {'amount_msat': amount - 1,
               'id': l4.info['id'],
               'delay': 5,
               'channel': c24}]
@@ -1570,13 +1640,17 @@ def test_forward_local_failed_stats(node_factory, bitcoind, executor):
     stats = l2.rpc.listforwards()
 
     assert [f['status'] for f in stats['forwards']] == ['local_failed', 'local_failed', 'local_failed', 'local_failed', 'local_failed']
-    assert l2.rpc.getinfo()['msatoshi_fees_collected'] == 0
+    assert l2.rpc.getinfo()['fees_collected_msat'] == 0
 
     assert 'received_time' in stats['forwards'][0] and 'resolved_time' not in stats['forwards'][0]
     assert 'received_time' in stats['forwards'][1] and 'resolved_time' not in stats['forwards'][1]
     assert 'received_time' in stats['forwards'][2] and 'resolved_time' not in stats['forwards'][2]
     assert 'received_time' in stats['forwards'][3] and 'resolved_time' not in stats['forwards'][3]
     assert 'received_time' in stats['forwards'][3] and 'resolved_time' not in stats['forwards'][4]
+
+    # Correct in and out channels
+    assert [s['in_channel'] for s in stats['forwards']] == [c12] * 5
+    assert [s.get('out_channel') for s in stats['forwards']] == [c23, c24, c25, None, c24]
 
 
 @pytest.mark.developer("too slow without --dev-fast-gossip")
@@ -1587,7 +1661,7 @@ def test_htlcs_cltv_only_difference(node_factory, bitcoind):
     # l3 will see a reconnect from l4 when l4 restarts.
     l1, l2, l3, l4 = node_factory.line_graph(4, wait_for_announce=True, opts=[{}] * 2 + [{'dev-no-reconnect': None, 'may_reconnect': True}] * 2)
 
-    inv = l4.rpc.invoice(msatoshi=10**8, label='x', description='desc')
+    inv = l4.rpc.invoice(amount_msat=10**8, label='x', description='desc')
     h = inv['payment_hash']
     l4.rpc.dev_ignore_htlcs(id=l3.info['id'], ignore=True)
 
@@ -1667,11 +1741,11 @@ def test_pay_retry(node_factory, bitcoind, executor, chainparams):
         """
         peer_node = opener.rpc.listpeers(peer.info['id'])['peers'][0]
         chan = peer_node['channels'][0]
-        maxpay = chan['spendable_msatoshi']
+        maxpay = chan['spendable_msat']
         lbl = ''.join(random.choice(string.ascii_letters) for _ in range(20))
         inv = peer.rpc.invoice(maxpay, lbl, "exhaust_channel")
         routestep = {
-            'msatoshi': maxpay,
+            'amount_msat': maxpay,
             'id': peer.info['id'],
             'delay': 10,
             'channel': scid
@@ -1723,7 +1797,7 @@ def test_pay_retry(node_factory, bitcoind, executor, chainparams):
     fut = executor.submit(listpays_nofail, inv['bolt11'])
 
     # Pay l1->l5 should succeed via straight line (eventually)
-    l1.rpc.dev_pay(inv['bolt11'], use_shadow=False)
+    l1.dev_pay(inv['bolt11'], use_shadow=False)
 
     # This should be OK.
     fut.result()
@@ -1738,12 +1812,12 @@ def test_pay_retry(node_factory, bitcoind, executor, chainparams):
     # Finally, fails to find a route.
     inv = l5.rpc.invoice(10**8, 'test_retry2', 'test_retry2')['bolt11']
     with pytest.raises(RpcError, match=r'4 attempts'):
-        l1.rpc.dev_pay(inv, use_shadow=False)
+        l1.dev_pay(inv, use_shadow=False)
 
 
 @pytest.mark.developer("needs DEVELOPER=1 otherwise gossip takes 5 minutes!")
 @pytest.mark.slow_test
-def test_pay_routeboost(node_factory, bitcoind, compat):
+def test_pay_routeboost(node_factory, bitcoind):
     """Make sure we can use routeboost information. """
     # l1->l2->l3--private-->l4
     l1, l2 = node_factory.line_graph(2, announce_channels=True, wait_for_announce=True)
@@ -1778,7 +1852,7 @@ def test_pay_routeboost(node_factory, bitcoind, compat):
     assert only_one(only_one(l1.rpc.decodepay(inv['bolt11'])['routes']))
 
     # Now we should be able to pay it.
-    l1.rpc.dev_pay(inv['bolt11'], use_shadow=False)
+    l1.dev_pay(inv['bolt11'], use_shadow=False)
 
     # Status should show all the gory details.
     status = l1.rpc.call('paystatus', [inv['bolt11']])
@@ -1789,7 +1863,7 @@ def test_pay_routeboost(node_factory, bitcoind, compat):
     assert 'routehint_modifications' not in only_one(status['pay'])
     assert 'local_exclusions' not in only_one(status['pay'])
     attempts = only_one(status['pay'])['attempts']
-    scid34 = only_one(l3.rpc.listpeers(l4.info['id'])['peers'])['channels'][0]['short_channel_id']
+    scid34 = only_one(l3.rpc.listpeers(l4.info['id'])['peers'])['channels'][0]['alias']['local']
     assert(len(attempts) == 1)
     a = attempts[0]
     assert(a['strategy'] == "Initial attempt")
@@ -1798,7 +1872,7 @@ def test_pay_routeboost(node_factory, bitcoind, compat):
 
     # With dev-route option we can test longer routehints.
     if DEVELOPER:
-        scid45 = only_one(l4.rpc.listpeers(l5.info['id'])['peers'])['channels'][0]['short_channel_id']
+        scid45 = only_one(l4.rpc.listpeers(l5.info['id'])['peers'])['channels'][0]['alias']['local']
         routel3l4l5 = [{'id': l3.info['id'],
                         'short_channel_id': scid34,
                         'fee_base_msat': 1000,
@@ -1809,11 +1883,11 @@ def test_pay_routeboost(node_factory, bitcoind, compat):
                         'fee_base_msat': 1000,
                         'fee_proportional_millionths': 10,
                         'cltv_expiry_delta': 6}]
-        inv = l5.rpc.call('invoice', {'msatoshi': 10**5,
-                                      'label': 'test_pay_routeboost2',
-                                      'description': 'test_pay_routeboost2',
-                                      'dev-routes': [routel3l4l5]})
-        l1.rpc.dev_pay(inv['bolt11'], use_shadow=False)
+        inv = l5.dev_invoice(amount_msat=10**5,
+                             label='test_pay_routeboost2',
+                             description='test_pay_routeboost2',
+                             dev_routes=[routel3l4l5])
+        l1.dev_pay(inv['bolt11'], use_shadow=False)
         status = l1.rpc.call('paystatus', [inv['bolt11']])
         pay = only_one(status['pay'])
         attempts = pay['attempts']
@@ -1831,12 +1905,12 @@ def test_pay_routeboost(node_factory, bitcoind, compat):
                       'fee_base_msat': 1000,
                       'fee_proportional_millionths': 10,
                       'cltv_expiry_delta': 6}]
-        inv = l5.rpc.call('invoice', {'msatoshi': 10**5,
-                                      'label': 'test_pay_routeboost5',
-                                      'description': 'test_pay_routeboost5',
-                                      'dev-routes': [routel3l4l5, routel3l5]})
-        l1.rpc.dev_pay(inv['bolt11'], label="paying test_pay_routeboost5",
-                       use_shadow=False)
+        inv = l5.dev_invoice(amount_msat=10**5,
+                             label='test_pay_routeboost5',
+                             description='test_pay_routeboost5',
+                             dev_routes=[routel3l4l5, routel3l5])
+        l1.dev_pay(inv['bolt11'], label="paying test_pay_routeboost5",
+                   use_shadow=False)
 
         status = l1.rpc.call('paystatus', [inv['bolt11']])
         assert only_one(status['pay'])['bolt11'] == inv['bolt11']
@@ -1855,7 +1929,7 @@ def test_pay_routeboost(node_factory, bitcoind, compat):
 
 
 @pytest.mark.developer("updates are delayed without --dev-fast-gossip")
-def test_setchannelfee_usage(node_factory, bitcoind):
+def test_setchannel_usage(node_factory, bitcoind):
     # TEST SETUP
     #
     # [l1] ---> [l2]  (channel funded)
@@ -1863,7 +1937,7 @@ def test_setchannelfee_usage(node_factory, bitcoind):
     #   o - - > [l3]  (only connected)
     #
     # - check initial SQL values
-    # - check setchannelfee can be used
+    # - check setchannel can be used
     # - checks command's return object format
     # - check custom SQL fee values
     # - check values in local nodes listchannels output
@@ -1873,77 +1947,124 @@ def test_setchannelfee_usage(node_factory, bitcoind):
     DEF_BASE = 10
     DEF_BASE_MSAT = Millisatoshi(DEF_BASE)
     DEF_PPM = 100
+    # Minus reserve
+    MAX_HTLC = Millisatoshi(int(FUNDAMOUNT * 1000 * 0.99))
 
     l1, l2, l3 = node_factory.get_nodes(3,
                                         opts={'fee-base': DEF_BASE, 'fee-per-satoshi': DEF_PPM})
     node_factory.join_nodes([l1, l2])
     l1.rpc.connect(l3.info['id'], 'localhost', l3.port)
 
-    def channel_get_fees(scid):
+    def channel_get_config(scid):
         return l1.db.query(
-            'SELECT feerate_base, feerate_ppm FROM channels '
-            'WHERE short_channel_id=\'{}\';'.format(scid))
+            'SELECT feerate_base, feerate_ppm, htlc_minimum_msat, htlc_maximum_msat FROM channels '
+            'WHERE scid={};'.format(scid_to_int(scid)))
 
     # get short channel id
     scid = l1.get_channel_scid(l2)
 
     # feerates should be init with global config
-    db_fees = l1.db_query('SELECT feerate_base, feerate_ppm FROM channels;')
+    db_fees = l1.db_query('SELECT feerate_base, feerate_ppm, htlc_maximum_msat FROM channels;')
     assert(db_fees[0]['feerate_base'] == DEF_BASE)
     assert(db_fees[0]['feerate_ppm'] == DEF_PPM)
+    # This will be the capacity - reserves:
+    assert(db_fees[0]['htlc_maximum_msat'] == MAX_HTLC)
     # this is also what listpeers should return
     peers = l1.rpc.listpeers()['peers']
     assert peers[0]['channels'][0]['fee_base_msat'] == DEF_BASE_MSAT
     assert peers[0]['channels'][0]['fee_proportional_millionths'] == DEF_PPM
+    assert peers[0]['channels'][0]['maximum_htlc_out_msat'] == MAX_HTLC
 
-    # custom setchannelfee scid <base> <ppm>
-    result = l1.rpc.setchannelfee(scid, 1337, 137)
+    # custom setchannel scid <feebase> <feeppm> <htlcmin> <htlcmax>
+    result = l1.rpc.setchannel(scid, 1337, 137, 17, 133337)
 
     # check result format
-    assert(result['base'] == 1337)
-    assert(result['ppm'] == 137)
     assert(len(result['channels']) == 1)
     assert(re.match('^[0-9a-f]{64}$', result['channels'][0]['channel_id']))
     assert(result['channels'][0]['peer_id'] == l2.info['id'])
     assert(result['channels'][0]['short_channel_id'] == scid)
+    assert(result['channels'][0]['fee_base_msat'] == 1337)
+    assert(result['channels'][0]['fee_proportional_millionths'] == 137)
+    assert(result['channels'][0]['minimum_htlc_out_msat'] == 17)
+    assert(result['channels'][0]['maximum_htlc_out_msat'] == 133337)
 
     # check if custom values made it into the database
-    db_fees = channel_get_fees(scid)
+    db_fees = channel_get_config(scid)
     assert(db_fees[0]['feerate_base'] == 1337)
     assert(db_fees[0]['feerate_ppm'] == 137)
+    assert(db_fees[0]['htlc_minimum_msat'] == 17)
+    assert(db_fees[0]['htlc_maximum_msat'] == 133337)
     # also check for updated values in `listpeers`
     peers = l1.rpc.listpeers()['peers']
     assert peers[0]['channels'][0]['fee_base_msat'] == Millisatoshi(1337)
     assert peers[0]['channels'][0]['fee_proportional_millionths'] == 137
+    assert peers[0]['channels'][0]['minimum_htlc_out_msat'] == 17
+    assert peers[0]['channels'][0]['maximum_htlc_out_msat'] == 133337
 
     # wait for gossip and check if l1 sees new fees in listchannels
     wait_for(lambda: [c['base_fee_millisatoshi'] for c in l1.rpc.listchannels(scid)['channels']] == [DEF_BASE, 1337])
     wait_for(lambda: [c['fee_per_millionth'] for c in l1.rpc.listchannels(scid)['channels']] == [DEF_PPM, 137])
+    wait_for(lambda: [c['htlc_minimum_msat'] for c in l1.rpc.listchannels(scid)['channels']] == [0, 17])
+    wait_for(lambda: [c['htlc_maximum_msat'] for c in l1.rpc.listchannels(scid)['channels']] == [MAX_HTLC, 133337])
 
     # also test with named and missing parameters
-    result = l1.rpc.setchannelfee(ppm=42, id=scid)
-    assert(result['base'] == DEF_BASE)
-    assert(result['ppm'] == 42)
+    result = l1.rpc.setchannel(feeppm=42, id=scid)
     assert(len(result['channels']) == 1)
     assert(re.match('^[0-9a-f]{64}$', result['channels'][0]['channel_id']))
     assert(result['channels'][0]['short_channel_id'] == scid)
-    result = l1.rpc.setchannelfee(base=42, id=scid)
-    assert(result['base'] == 42)
-    assert(result['ppm'] == DEF_PPM)
+    assert(result['channels'][0]['fee_base_msat'] == 1337)
+    assert(result['channels'][0]['fee_proportional_millionths'] == 42)
+    assert result['channels'][0]['minimum_htlc_out_msat'] == 17
+    assert(result['channels'][0]['maximum_htlc_out_msat'] == 133337)
+
+    result = l1.rpc.setchannel(feebase=43, id=scid)
     assert(len(result['channels']) == 1)
     assert(re.match('^[0-9a-f]{64}$', result['channels'][0]['channel_id']))
     assert(result['channels'][0]['short_channel_id'] == scid)
+    assert(result['channels'][0]['fee_base_msat'] == 43)
+    assert(result['channels'][0]['fee_proportional_millionths'] == 42)
+    assert result['channels'][0]['minimum_htlc_out_msat'] == 17
+    assert(result['channels'][0]['maximum_htlc_out_msat'] == 133337)
+
+    result = l1.rpc.setchannel(htlcmin=45, id=scid)
+    assert(len(result['channels']) == 1)
+    assert(re.match('^[0-9a-f]{64}$', result['channels'][0]['channel_id']))
+    assert(result['channels'][0]['short_channel_id'] == scid)
+    assert(result['channels'][0]['fee_base_msat'] == 43)
+    assert(result['channels'][0]['fee_proportional_millionths'] == 42)
+    assert result['channels'][0]['minimum_htlc_out_msat'] == 45
+    assert(result['channels'][0]['maximum_htlc_out_msat'] == 133337)
+
+    result = l1.rpc.setchannel(htlcmax=43333, id=scid)
+    assert(len(result['channels']) == 1)
+    assert(re.match('^[0-9a-f]{64}$', result['channels'][0]['channel_id']))
+    assert(result['channels'][0]['short_channel_id'] == scid)
+    assert(result['channels'][0]['fee_base_msat'] == 43)
+    assert(result['channels'][0]['fee_proportional_millionths'] == 42)
+    assert result['channels'][0]['minimum_htlc_out_msat'] == 45
+    assert(result['channels'][0]['maximum_htlc_out_msat'] == 43333)
 
     # check if negative fees raise error and DB keeps values
     # JSONRPC2_INVALID_PARAMS := -32602
+    from pyln.client import LightningRpc
     with pytest.raises(RpcError, match=r'-32602'):
-        l1.rpc.setchannelfee(scid, -1, -1)
+        # Need to bypass pyln since it'd check args locally. We also
+        # have to sidestep the schema validation, it attempts to
+        # instantiate Millisatoshis and fails due to the non-negative
+        # constraint.
+        LightningRpc.call(l1.rpc, 'setchannel', {
+            "id": scid,
+            "feebase": -1,
+            "feeppm": -1
+        })
 
     # test if zero fees is possible
-    result = l1.rpc.setchannelfee(scid, 0, 0)
-    assert(result['base'] == 0)
-    assert(result['ppm'] == 0)
-    db_fees = channel_get_fees(scid)
+    result = l1.rpc.setchannel(scid, 0, 0)
+    assert(result['channels'][0]['short_channel_id'] == scid)
+    assert(result['channels'][0]['fee_base_msat'] == 0)
+    assert(result['channels'][0]['fee_proportional_millionths'] == 0)
+
+    db_fees = channel_get_config(scid)
     assert(db_fees[0]['feerate_base'] == 0)
     assert(db_fees[0]['feerate_ppm'] == 0)
     # also check for updated values in `listpeers`
@@ -1951,53 +2072,51 @@ def test_setchannelfee_usage(node_factory, bitcoind):
     assert peers[0]['channels'][0]['fee_base_msat'] == Millisatoshi(0)
     assert peers[0]['channels'][0]['fee_proportional_millionths'] == 0
 
-    # disable and check for global values to be returned
-    result = l1.rpc.setchannelfee(scid)
-    assert(result['base'] == DEF_BASE)
-    assert(result['ppm'] == DEF_PPM)
-    # check default values in DB
-    db_fees = channel_get_fees(scid)
-    assert(db_fees[0]['feerate_base'] == DEF_BASE)
-    assert(db_fees[0]['feerate_ppm'] == DEF_PPM)
-    # also check for updated values in `listpeers`
-    peers = l1.rpc.listpeers()['peers']
-    assert peers[0]['channels'][0]['fee_base_msat'] == DEF_BASE_MSAT
-    assert peers[0]['channels'][0]['fee_proportional_millionths'] == DEF_PPM
-
     # check also peer id can be used
-    result = l1.rpc.setchannelfee(l2.info['id'], 42, 43)
-    assert(result['base'] == 42)
-    assert(result['ppm'] == 43)
+    result = l1.rpc.setchannel(l2.info['id'], 142, 143)
     assert(len(result['channels']) == 1)
     assert(result['channels'][0]['peer_id'] == l2.info['id'])
     assert(result['channels'][0]['short_channel_id'] == scid)
-    db_fees = channel_get_fees(scid)
-    assert(db_fees[0]['feerate_base'] == 42)
-    assert(db_fees[0]['feerate_ppm'] == 43)
+    assert(result['channels'][0]['fee_base_msat'] == 142)
+    assert(result['channels'][0]['fee_proportional_millionths'] == 143)
+
+    db_fees = channel_get_config(scid)
+    assert(db_fees[0]['feerate_base'] == 142)
+    assert(db_fees[0]['feerate_ppm'] == 143)
 
     # check if invalid scid raises proper error
-    with pytest.raises(RpcError, match=r'-1.*Could not find active channel of peer with that id'):
-        result = l1.rpc.setchannelfee(l3.info['id'], 42, 43)
+    with pytest.raises(RpcError, match=r'-1.*Could not find any active channels of peer with that id'):
+        result = l1.rpc.setchannel(l3.info['id'], 42, 43)
     with pytest.raises(RpcError, match=r'-32602.*id: should be a channel ID or short channel ID: invalid token'):
-        result = l1.rpc.setchannelfee('f42' + scid[3:], 42, 43)
+        result = l1.rpc.setchannel('f42' + scid[3:], 42, 43)
 
     # check if 'base' unit can be modified to satoshi
-    result = l1.rpc.setchannelfee(scid, '1sat')
-    assert(result['base'] == 1000)
-    db_fees = channel_get_fees(scid)
+    result = l1.rpc.setchannel(scid, '1sat')
+    assert(len(result['channels']) == 1)
+    assert(result['channels'][0]['peer_id'] == l2.info['id'])
+    assert(result['channels'][0]['short_channel_id'] == scid)
+    assert(result['channels'][0]['fee_base_msat'] == 1000)
+    db_fees = channel_get_config(scid)
     assert(db_fees[0]['feerate_base'] == 1000)
 
     # check if 'ppm' values greater than u32_max fail
     with pytest.raises(RpcError, match=r'-32602.*ppm: should be an integer: invalid token'):
-        l1.rpc.setchannelfee(scid, 0, 2**32)
+        LightningRpc.call(l1.rpc, 'setchannel', payload={
+            "id": scid,
+            'feebase': 0,
+            'feeppm': 2**32,
+        })
 
     # check if 'base' values greater than u32_max fail
     with pytest.raises(RpcError, match=r'-32602.*base: exceeds u32 max: invalid token'):
-        l1.rpc.setchannelfee(scid, 2**32)
+        LightningRpc.call(l1.rpc, 'setchannel', payload={
+            "id": scid,
+            "feebase": 2**32,
+        })
 
 
 @pytest.mark.developer("gossip without DEVELOPER=1 is slow")
-def test_setchannelfee_state(node_factory, bitcoind):
+def test_setchannel_state(node_factory, bitcoind):
     # TEST SETUP
     #
     # [l0] --> [l1] --> [l2]
@@ -2021,7 +2140,7 @@ def test_setchannelfee_state(node_factory, bitcoind):
 
     # try setting the fee in state AWAITING_LOCKIN should be possible
     # assert(l1.channel_state(l2) == "CHANNELD_AWAITING_LOCKIN")
-    result = l1.rpc.setchannelfee(l2.info['id'], 42, 0)
+    result = l1.rpc.setchannel(l2.info['id'], 42, 0)
     assert(result['channels'][0]['peer_id'] == l2.info['id'])
     # cid = result['channels'][0]['channel_id']
 
@@ -2029,14 +2148,13 @@ def test_setchannelfee_state(node_factory, bitcoind):
     mine_funding_to_announce(bitcoind, [l0, l1, l2])
 
     l0.wait_for_route(l2)
-    inv = l2.rpc.invoice(100000, 'test_setchannelfee_state', 'desc')['bolt11']
-    result = l0.rpc.dev_pay(inv, use_shadow=False)
+    inv = l2.rpc.invoice(100000, 'test_setchannel_state', 'desc')['bolt11']
+    result = l0.dev_pay(inv, use_shadow=False)
     assert result['status'] == 'complete'
-    assert result['msatoshi_sent'] == 100042
+    assert result['amount_sent_msat'] == 100042
 
     # Disconnect and unilaterally close from l2 to l1
     l2.rpc.disconnect(l1.info['id'], force=True)
-    l1.rpc.disconnect(l2.info['id'], force=True)
     result = l2.rpc.close(scid, 1)
     assert result['type'] == 'unilateral'
 
@@ -2045,15 +2163,15 @@ def test_setchannelfee_state(node_factory, bitcoind):
         bitcoind.generate_block(1)
     # assert l1.channel_state(l2) == "FUNDING_SPEND_SEEN"
 
-    # Try to setchannelfee in order to raise expected error.
+    # Try to setchannel in order to raise expected error.
     # To reduce false positive flakes, only test if state is not NORMAL anymore.
     with pytest.raises(RpcError, match=r'-1.*'):
-        # l1.rpc.setchannelfee(l2.info['id'], 10, 1)
-        l1.rpc.setchannelfee(l2.info['id'], 10, 1)
+        # l1.rpc.setchannel(l2.info['id'], 10, 1)
+        l1.rpc.setchannel(l2.info['id'], 10, 1)
 
 
 @pytest.mark.developer("gossip without DEVELOPER=1 is slow")
-def test_setchannelfee_routing(node_factory, bitcoind):
+def test_setchannel_routing(node_factory, bitcoind):
     # TEST SETUP
     #
     # [l1] <--default_fees--> [l2] <--specific_fees--> [l3]
@@ -2063,22 +2181,28 @@ def test_setchannelfee_routing(node_factory, bitcoind):
     # - payment can be done using specific fees
     # - channel specific fees can be disabled again
     # - payment can be done using global fees
+    # - htlc max is honored
     DEF_BASE = 1
     DEF_PPM = 10
+    MAX_HTLC = Millisatoshi(int(FUNDAMOUNT * 1000 * 0.99))
+    MIN_HTLC = Millisatoshi(0)
 
     l1, l2, l3 = node_factory.line_graph(
         3, announce_channels=True, wait_for_announce=True,
-        opts={'fee-base': DEF_BASE, 'fee-per-satoshi': DEF_PPM})
+        opts={'fee-base': DEF_BASE, 'fee-per-satoshi': DEF_PPM,
+              'disable-mpp': None})
 
     # get short channel id for 2->3
     scid = l2.get_channel_scid(l3)
 
     # TEST CUSTOM VALUES
-    l2.rpc.setchannelfee(scid, 1337, 137)
+    l2.rpc.setchannel(scid, 1337, 137, 17, 4000000, enforcedelay=0)
 
     # wait for l1 to see updated channel via gossip
     wait_for(lambda: [c['base_fee_millisatoshi'] for c in l1.rpc.listchannels(scid)['channels']] == [1337, DEF_BASE])
     wait_for(lambda: [c['fee_per_millionth'] for c in l1.rpc.listchannels(scid)['channels']] == [137, DEF_PPM])
+    wait_for(lambda: [c['htlc_minimum_msat'] for c in l1.rpc.listchannels(scid)['channels']] == [17, MIN_HTLC])
+    wait_for(lambda: [c['htlc_maximum_msat'] for c in l1.rpc.listchannels(scid)['channels']] == [4000000, MAX_HTLC])
 
     # test fees are applied to HTLC forwards
     #
@@ -2086,50 +2210,86 @@ def test_setchannelfee_routing(node_factory, bitcoind):
     # If l1 were to send 4,999,999 millisatoshi to l3 via l2, it needs to
     # pay l2 the fee it specified in the l2->l3 `channel_update`, calculated as
     # per [HTLC Fees](#htlc_fees):  base + amt * pm / 10**6
-    #
-    # 1337 + 4999999 * 137 / 1000000 = 2021.999 (2021)
-    route = l1.rpc.getroute(l3.info['id'], 4999999, 1)["route"]
-    assert len(route) == 2
-    assert route[0]['msatoshi'] == 5002020
-    assert route[1]['msatoshi'] == 4999999
+
+    # Note: we use fp16 internally for channel max, so we overestimate:
+    # from devtools/fp16 4000000: fp16:5fa1 min 3999744 max 4001791
+    # Since it rounds up, it will use 4001792 as max capacity.
+
+    # Should refuse to route this!
+    with pytest.raises(RpcError, match=r'Could not find a route'):
+        l1.rpc.getroute(l3.info['id'], 4001793, 1, fuzzpercent=0)["route"]
+
+    # We should consider this unroutable!  (MPP is disabled!)
+    inv = l3.dev_invoice(amount_msat=4001793,
+                         label='test_setchannel_1',
+                         description='desc',
+                         dev_routes=[])
+    with pytest.raises(RpcError) as routefail:
+        l1.dev_pay(inv['bolt11'], use_shadow=False)
+    assert routefail.value.error['attempts'][0]['failreason'] == 'No path found'
+
+    # 1337 + 4000000 * 137 / 1000000 = 1885
+    route_ok = l1.rpc.getroute(l3.info['id'], 4000000, 1)["route"]
+    assert len(route_ok) == 2
+    assert route_ok[0]['amount_msat'] == 4001885
+    assert route_ok[1]['amount_msat'] == 4000000
+
+    # Make variant that tries to pay more than allowed htlc!
+    route_bad = copy.deepcopy(route_ok)
+    route_bad[0]['amount_msat'] = Millisatoshi(4001887)
+    route_bad[1]['amount_msat'] = Millisatoshi(4000001)
+    assert route_bad != route_ok
 
     # In case l3 includes a routehint, we need to make sure they also know
     # about the new fees, otherwise we may end up with the old feerate
-    wait_for(lambda: [(c['base_fee_millisatoshi'], c['fee_per_millionth'], c['active']) for c in l3.rpc.listchannels(scid)['channels']] == [(1337, 137, True), (DEF_BASE, DEF_PPM, True)])
+    wait_for(lambda: [(c['base_fee_millisatoshi'], c['fee_per_millionth'], c['htlc_minimum_msat'], c['htlc_maximum_msat'], c['active']) for c in l3.rpc.listchannels(scid)['channels']] == [(1337, 137, 17, 4000000, True), (DEF_BASE, DEF_PPM, MIN_HTLC, MAX_HTLC, True)])
 
     # do and check actual payment
-    inv = l3.rpc.invoice(4999999, 'test_setchannelfee_1', 'desc')['bolt11']
-    result = l1.rpc.dev_pay(inv, use_shadow=False)
-    assert result['status'] == 'complete'
-    assert result['msatoshi_sent'] == 5002020
+    inv = l3.rpc.invoice(4000000, 'test_setchannel_2', 'desc')
+    # Check that routehint from l3 incorporated new feerate!
+    decoded = l1.rpc.decodepay(inv['bolt11'])
+    assert decoded['routes'] == [[{'pubkey': l2.info['id'], 'short_channel_id': scid, 'fee_base_msat': 1337, 'fee_proportional_millionths': 137, 'cltv_expiry_delta': 6}]]
 
-    # TEST DISABLE and check global fee routing
-    l2.rpc.setchannelfee(scid)
+    # This will fail.
+    l1.rpc.sendpay(route_bad, inv['payment_hash'], payment_secret=inv['payment_secret'])
+    with pytest.raises(RpcError, match='WIRE_TEMPORARY_CHANNEL_FAILURE'):
+        l1.rpc.waitsendpay(inv['payment_hash'])
 
-    # wait for l1 to see default values again via gossip
-    wait_for(lambda: [c['base_fee_millisatoshi'] for c in l1.rpc.listchannels(scid)['channels']] == [DEF_BASE, DEF_BASE])
-    wait_for(lambda: [c['fee_per_millionth'] for c in l1.rpc.listchannels(scid)['channels']] == [DEF_PPM, DEF_PPM])
+    # This will succeed
+    l1.rpc.sendpay(route_ok, inv['payment_hash'], payment_secret=inv['payment_secret'])
+    l1.rpc.waitsendpay(inv['payment_hash'])
 
-    # test if global fees are applied again (base 1 ppm 10)
-    # 1 + 4999999 * 10 / 1000000 = 50.999 (50)
-    route = l1.rpc.getroute(l3.info['id'], 4999999, 1)["route"]
-    assert len(route) == 2
-    assert route[0]['msatoshi'] == 5000049
-    assert route[1]['msatoshi'] == 4999999
+    # Now try below minimum
+    route_ok = l1.rpc.getroute(l3.info['id'], 17, 1)["route"]
+    assert len(route_ok) == 2
+    assert route_ok[0]['amount_msat'] == 1337 + 17
+    assert route_ok[1]['amount_msat'] == 17
 
-    # In case l3 includes a routehint, we need to make sure they also know
-    # about the new fees, otherwise we may end up with the old feerate
-    wait_for(lambda: [(c['base_fee_millisatoshi'], c['fee_per_millionth'], c['active']) for c in l3.rpc.listchannels(scid)['channels']] == [(DEF_BASE, DEF_PPM, True), (DEF_BASE, DEF_PPM, True)])
+    route_bad = copy.deepcopy(route_ok)
+    route_bad[0]['amount_msat'] = Millisatoshi(1337 + 16)
+    route_bad[1]['amount_msat'] = Millisatoshi(16)
+    assert route_bad != route_ok
 
-    # do and check actual payment
-    inv = l3.rpc.invoice(4999999, 'test_setchannelfee_2', 'desc')['bolt11']
-    result = l1.rpc.dev_pay(inv, use_shadow=False)
-    assert result['status'] == 'complete'
-    assert result['msatoshi_sent'] == 5000049
+    inv = l3.rpc.invoice(17, 'test_setchannel_3', 'desc')
+
+    # This will fail.
+    l1.rpc.sendpay(route_bad, inv['payment_hash'], payment_secret=inv['payment_secret'])
+    with pytest.raises(RpcError, match='WIRE_TEMPORARY_CHANNEL_FAILURE'):
+        l1.rpc.waitsendpay(inv['payment_hash'])
+
+    # This will succeed
+    l1.rpc.sendpay(route_ok, inv['payment_hash'], payment_secret=inv['payment_secret'])
+    l1.rpc.waitsendpay(inv['payment_hash'])
+
+    # Check that this one warns about capacity!
+    inv = l3.rpc.call('invoice', {'amount_msat': 4001793,
+                                  'label': 'test_setchannel_4',
+                                  'description': 'desc'})
+    assert 'warning_capacity' in inv
 
 
 @pytest.mark.developer("gossip without DEVELOPER=1 is slow")
-def test_setchannelfee_zero(node_factory, bitcoind):
+def test_setchannel_zero(node_factory, bitcoind):
     # TEST SETUP
     #
     # [l1] <--default_fees--> [l2] <--specific_fees--> [l3]
@@ -2139,6 +2299,7 @@ def test_setchannelfee_zero(node_factory, bitcoind):
     # - payment can be done using zero fees
     DEF_BASE = 1
     DEF_PPM = 10
+    MAX_HTLC = Millisatoshi(int(FUNDAMOUNT * 1000 * 0.99))
 
     l1, l2, l3 = node_factory.line_graph(
         3, announce_channels=True, wait_for_announce=True,
@@ -2148,29 +2309,37 @@ def test_setchannelfee_zero(node_factory, bitcoind):
     scid = l2.get_channel_scid(l3)
 
     # TEST ZERO fees possible
-    l2.rpc.setchannelfee(scid, 0, 0)
+    l2.rpc.setchannel(scid, 0, 0)
     wait_for(lambda: [c['base_fee_millisatoshi'] for c in l1.rpc.listchannels(scid)['channels']] == [0, DEF_BASE])
     wait_for(lambda: [c['fee_per_millionth'] for c in l1.rpc.listchannels(scid)['channels']] == [0, DEF_PPM])
 
     # test if zero fees are applied
     route = l1.rpc.getroute(l3.info['id'], 4999999, 1)["route"]
     assert len(route) == 2
-    assert route[0]['msatoshi'] == 4999999
-    assert route[1]['msatoshi'] == 4999999
+    assert route[0]['amount_msat'] == 4999999
+    assert route[1]['amount_msat'] == 4999999
 
     # Wait for l3 to know about our low-balling, otherwise they'll add a wrong
     # routehint to the invoice.
     wait_for(lambda: [(c['base_fee_millisatoshi'], c['fee_per_millionth'], c['active']) for c in l3.rpc.listchannels(scid)['channels']] == [(0, 0, True), (DEF_BASE, DEF_PPM, True)])
 
     # do and check actual payment
-    inv = l3.rpc.invoice(4999999, 'test_setchannelfee_3', 'desc')['bolt11']
-    result = l1.rpc.dev_pay(inv, use_shadow=False)
+    inv = l3.rpc.invoice(4999999, 'test_setchannel_3', 'desc')['bolt11']
+    result = l1.dev_pay(inv, use_shadow=False)
     assert result['status'] == 'complete'
-    assert result['msatoshi_sent'] == 4999999
+    assert result['amount_sent_msat'] == 4999999
+
+    # FIXME: hack something up to advertize min_htlc > 0, then test mintoolow.
+    with pytest.raises(RpcError, match="htlcmax cannot be less than htlcmin"):
+        l2.rpc.setchannel(scid, htlcmin=100000, htlcmax=99999)
+
+    ret = l2.rpc.setchannel(scid, htlcmax=FUNDAMOUNT * 1000)
+    assert 'warning_htlcmax_too_high' in only_one(ret['channels'])
+    assert only_one(ret['channels'])['maximum_htlc_out_msat'] == MAX_HTLC
 
 
 @pytest.mark.developer("gossip without DEVELOPER=1 is slow")
-def test_setchannelfee_restart(node_factory, bitcoind):
+def test_setchannel_restart(node_factory, bitcoind):
     # TEST SETUP
     #
     # [l1] <--default_fees--> [l2] <--specific_fees--> [l3]
@@ -2181,6 +2350,8 @@ def test_setchannelfee_restart(node_factory, bitcoind):
     # - l1 routing can be made to l3 and global (1 10) fees are applied
     DEF_BASE = 1
     DEF_PPM = 10
+    MIN_HTLC = Millisatoshi(0)
+    MAX_HTLC = Millisatoshi(int(FUNDAMOUNT * 1000 * 0.99))
     OPTS = {'may_reconnect': True, 'fee-base': DEF_BASE, 'fee-per-satoshi': DEF_PPM}
 
     l1, l2, l3 = node_factory.line_graph(3, announce_channels=True, wait_for_announce=True, opts=OPTS)
@@ -2190,7 +2361,7 @@ def test_setchannelfee_restart(node_factory, bitcoind):
     scid23 = l2.get_channel_scid(l3)
 
     # l2 set custom fees
-    l2.rpc.setchannelfee(scid23, 1337, 137)
+    l2.rpc.setchannel(scid23, 1337, 137, 17, 500001)
 
     # restart l2 and reconnect
     l2.restart()
@@ -2201,22 +2372,22 @@ def test_setchannelfee_restart(node_factory, bitcoind):
     wait_for(lambda: [c['active'] for c in l1.rpc.listchannels(scid12)['channels']] == [True, True])
 
     # l1 wait for channel update from l2
-    wait_for(lambda: [(c['base_fee_millisatoshi'], c['fee_per_millionth'], c['active']) for c in l1.rpc.listchannels(scid23)['channels']] == [(1337, 137, True), (DEF_BASE, DEF_PPM, True)])
+    wait_for(lambda: [(c['base_fee_millisatoshi'], c['fee_per_millionth'], c['htlc_minimum_msat'], c['htlc_maximum_msat'], c['active']) for c in l1.rpc.listchannels(scid23)['channels']] == [(1337, 137, 17, 500001, True), (DEF_BASE, DEF_PPM, MIN_HTLC, MAX_HTLC, True)])
 
     # In case l3 includes a routehint, we need to make sure they also know
     # about the new fees, otherwise we may end up with the old feerate
-    wait_for(lambda: [(c['base_fee_millisatoshi'], c['fee_per_millionth'], c['active']) for c in l3.rpc.listchannels(scid23)['channels']] == [(1337, 137, True), (DEF_BASE, DEF_PPM, True)])
+    wait_for(lambda: [(c['base_fee_millisatoshi'], c['fee_per_millionth'], c['htlc_minimum_msat'], c['htlc_maximum_msat'], c['active']) for c in l3.rpc.listchannels(scid23)['channels']] == [(1337, 137, 17, 500001, True), (DEF_BASE, DEF_PPM, MIN_HTLC, MAX_HTLC, True)])
 
     # l1 can make payment to l3 with custom fees being applied
-    # Note: BOLT #7 math works out to 2021 msat fees
-    inv = l3.rpc.invoice(4999999, 'test_setchannelfee_1', 'desc')['bolt11']
-    result = l1.rpc.dev_pay(inv, use_shadow=False)
+    # Note: BOLT #7 math works out to 1405 msat fees
+    inv = l3.rpc.invoice(499999, 'test_setchannel_1', 'desc')['bolt11']
+    result = l1.dev_pay(inv, use_shadow=False)
     assert result['status'] == 'complete'
-    assert result['msatoshi_sent'] == 5002020
+    assert result['amount_sent_msat'] == 501404
 
 
 @pytest.mark.developer("updates are delayed without --dev-fast-gossip")
-def test_setchannelfee_all(node_factory, bitcoind):
+def test_setchannel_all(node_factory, bitcoind):
     # TEST SETUP
     #
     # [l1]----> [l2]
@@ -2236,7 +2407,7 @@ def test_setchannelfee_all(node_factory, bitcoind):
     scid3 = l1.get_channel_scid(l3)
 
     # now try to set all (two) channels using wildcard syntax
-    result = l1.rpc.setchannelfee("all", 0xDEAD, 0xBEEF)
+    result = l1.rpc.setchannel("all", 0xDEAD, 0xBEEF, 0xBAD, 0xCAFE)
 
     wait_for(lambda: [c['base_fee_millisatoshi'] for c in l1.rpc.listchannels(scid2)['channels']] == [DEF_BASE, 0xDEAD])
     wait_for(lambda: [c['fee_per_millionth'] for c in l1.rpc.listchannels(scid2)['channels']] == [DEF_PPM, 0xBEEF])
@@ -2244,12 +2415,41 @@ def test_setchannelfee_all(node_factory, bitcoind):
     wait_for(lambda: [c['fee_per_millionth'] for c in l1.rpc.listchannels(scid3)['channels']] == [0xBEEF, DEF_PPM])
 
     assert len(result['channels']) == 2
-    assert result['base'] == 0xDEAD
-    assert result['ppm'] == 0xBEEF
     assert result['channels'][0]['peer_id'] == l2.info['id']
     assert result['channels'][0]['short_channel_id'] == scid2
+    assert result['channels'][0]['fee_base_msat'] == 0xDEAD
+    assert result['channels'][0]['fee_proportional_millionths'] == 0xBEEF
+    assert result['channels'][0]['minimum_htlc_out_msat'] == 0xBAD
+    assert result['channels'][0]['maximum_htlc_out_msat'] == 0xCAFE
     assert result['channels'][1]['peer_id'] == l3.info['id']
     assert result['channels'][1]['short_channel_id'] == scid3
+    assert result['channels'][1]['fee_base_msat'] == 0xDEAD
+    assert result['channels'][1]['fee_proportional_millionths'] == 0xBEEF
+    assert result['channels'][1]['minimum_htlc_out_msat'] == 0xBAD
+    assert result['channels'][1]['maximum_htlc_out_msat'] == 0xCAFE
+
+
+@pytest.mark.developer("updates are delayed without --dev-fast-gossip")
+def test_setchannel_startup_opts(node_factory, bitcoind):
+    """Tests that custom config/cmdline options are applied correctly when set
+    """
+    opts = {
+        'fee-base': 2,
+        'fee-per-satoshi': 3,
+        'htlc-minimum-msat': '4msat',
+        'htlc-maximum-msat': '5msat'
+    }
+    l1, l2 = node_factory.line_graph(2, opts=opts, wait_for_announce=True)
+
+    result = l2.rpc.listchannels()['channels']
+    assert result[0]['base_fee_millisatoshi'] == 2
+    assert result[0]['fee_per_millionth'] == 3
+    assert result[0]['htlc_minimum_msat'] == Millisatoshi(4)
+    assert result[0]['htlc_maximum_msat'] == Millisatoshi(5)
+    assert result[1]['base_fee_millisatoshi'] == 2
+    assert result[1]['fee_per_millionth'] == 3
+    assert result[1]['htlc_minimum_msat'] == Millisatoshi(4)
+    assert result[1]['htlc_maximum_msat'] == Millisatoshi(5)
 
 
 @pytest.mark.developer("gossip without DEVELOPER=1 is slow")
@@ -2494,6 +2694,9 @@ def test_htlc_too_dusty_outgoing(node_factory, bitcoind, chainparams):
     l1.set_feerates([feerate * 2] * 4, False)
     l1.restart()
 
+    # Make sure fails before we try sending htlc!
+    l1.daemon.wait_for_log('Too much dust to update fee')
+
     # the channel should start warning -- too much dust
     inv = l2.rpc.invoice(htlc_val_msat, str(num_dusty_htlcs + 1), str(num_dusty_htlcs + 1))
     with pytest.raises(RpcError, match=r'WIRE_TEMPORARY_CHANNEL_FAILURE'):
@@ -2545,7 +2748,7 @@ def test_error_returns_blockheight(node_factory, bitcoind):
     """Test that incorrect_or_unknown_payment_details returns block height"""
     l1, l2 = node_factory.line_graph(2)
 
-    l1.rpc.sendpay([{'msatoshi': 100,
+    l1.rpc.sendpay([{'amount_msat': 100,
                      'id': l2.info['id'],
                      'delay': 10,
                      'channel': l1.get_channel_scid(l2)}],
@@ -2575,14 +2778,14 @@ def test_tlv_or_legacy(node_factory, bitcoind):
 
     # We need to force l3 to provide route hint from l2 (it won't normally,
     # since it sees l2 as a dead end).
-    inv = l3.rpc.call('invoice', {"msatoshi": 10000,
-                                  "label": "test_tlv1",
-                                  "description": "test_tlv1",
-                                  "dev-routes": [[{'id': l2.info['id'],
-                                                   'short_channel_id': scid23,
-                                                   'fee_base_msat': 1,
-                                                   'fee_proportional_millionths': 10,
-                                                   'cltv_expiry_delta': 6}]]})['bolt11']
+    inv = l3.dev_invoice(amount_msat=10000,
+                         label="test_tlv1",
+                         description="test_tlv1",
+                         dev_routes=[[{'id': l2.info['id'],
+                                       'short_channel_id': scid23,
+                                       'fee_base_msat': 1,
+                                       'fee_proportional_millionths': 10,
+                                       'cltv_expiry_delta': 6}]])['bolt11']
     l1.rpc.pay(inv)
 
     # Since L1 hasn't seen broadcast, it doesn't know L2 isn't TLV, but invoice tells it about L3
@@ -2606,7 +2809,6 @@ def test_tlv_or_legacy(node_factory, bitcoind):
     l3.daemon.wait_for_log("Got onion.*'type': 'tlv'")
 
 
-@pytest.mark.developer('Needs dev-routes')
 @unittest.skipIf(TEST_NETWORK != 'regtest', "Invoice is network specific")
 def test_pay_no_secret(node_factory, bitcoind):
     l1, l2 = node_factory.line_graph(2, wait_for_announce=True)
@@ -2625,13 +2827,11 @@ def test_pay_no_secret(node_factory, bitcoind):
         l1.rpc.pay(inv_nosecret)
 
 
-@flaky
 def test_shadow_routing(node_factory):
     """
     Test the value randomization through shadow routing
 
-    Since there is a very low (0.5**10) probability that it fails we mark it
-    as flaky.
+    Note there is a very low (0.5**10) probability that it fails.
     """
     # We need l3 for random walk
     l1, l2, l3 = node_factory.line_graph(3, wait_for_announce=True)
@@ -2653,26 +2853,22 @@ def test_shadow_routing(node_factory):
 def test_createonion_rpc(node_factory):
     l1 = node_factory.get_node()
 
+    # From bolt04/onion-test.json:
     hops = [{
         "pubkey": "02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619",
-        # legacy
-        "payload": "000000000000000000000000000000000000000000000000000000000000000000"
+        "payload": "1202023a98040205dc06080000000000000001"
     }, {
         "pubkey": "0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c",
-        # tlv (20 bytes)
-        "payload": "140101010101010101000000000000000100000001"
+        "payload": "52020236b00402057806080000000000000002fd02013c0102030405060708090a0b0c0d0e0f0102030405060708090a0b0c0d0e0f0102030405060708090a0b0c0d0e0f0102030405060708090a0b0c0d0e0f"
     }, {
         "pubkey": "027f31ebc5462c1fdce1b737ecff52d37d75dea43ce11c74d25aa297165faa2007",
-        # TLV (256 bytes)
-        "payload": "fd0100000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"
+        "payload": "12020230d4040204e206080000000000000003"
     }, {
         "pubkey": "032c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991",
-        # tlv (20 bytes)
-        "payload": "140303030303030303000000000000000300000003"
+        "payload": "1202022710040203e806080000000000000004"
     }, {
         "pubkey": "02edabbd16b41c8371b92ef2f04c1185b4f03b6dcd52ba9b78d9d7c89c8f221145",
-        # legacy
-        "payload": "000404040404040404000000000000000400000004000000000000000000000000"
+        "payload": "fd011002022710040203e8082224a33562c54507a9334e79f0dc4f17d407e6d7c61f0e2f3d0d38599502f617042710fd012de02a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a"
     }]
 
     res = l1.rpc.createonion(hops=hops, assocdata="BB" * 32)
@@ -2683,8 +2879,7 @@ def test_createonion_rpc(node_factory):
                              session_key="41" * 32)
     # The trailer is generated using the filler and can be ued as a
     # checksum. This trailer is from the test-vector in the specs.
-    print(res)
-    assert(res['onion'].endswith('9400f45a48e6dc8ddbaeb3'))
+    assert(res['onion'].endswith('9126aaefb627719f421e20'))
 
 
 @pytest.mark.developer("gossip propagation is slow without DEVELOPER=1")
@@ -2697,24 +2892,15 @@ def test_sendonion_rpc(node_factory):
     first_hop = route[0]
     blockheight = l1.rpc.getinfo()['blockheight']
 
-    def serialize_payload(n):
-        block, tx, out = n['channel'].split('x')
-        payload = hexlify(struct.pack(
-            "!BQQL",
-            0,
-            int(block) << 40 | int(tx) << 16 | int(out),
-            int(n['amount_msat']),
-            blockheight + n['delay'])).decode('ASCII')
-        payload += "00" * 12
-        return payload
+    def truncate_encode(i: int):
+        """Encode a tu64 (or tu32 etc) value"""
+        ret = struct.pack("!Q", i)
+        while ret.startswith(b'\0'):
+            ret = ret[1:]
+        return ret
 
-    def serialize_payload_final_tlv(n, payment_secret: str):
-        def truncate_encode(i: int):
-            """Encode a tu64 (or tu32 etc) value"""
-            ret = struct.pack("!Q", i)
-            while ret.startswith(b'\0'):
-                ret = ret[1:]
-            return ret
+    def serialize_payload_tlv(n):
+        block, tx, out = n['channel'].split('x')
 
         payload = TlvPayload()
         # BOLT #4:
@@ -2729,7 +2915,32 @@ def test_sendonion_rpc(node_factory):
         #    2. data:
         #        * [`tu32`:`outgoing_cltv_value`]
         b = BytesIO()
-        b.write(truncate_encode(n['delay']))
+        b.write(truncate_encode(blockheight + n['delay']))
+        payload.add_field(4, b.getvalue())
+        # BOLT #4:
+        #    1. type: 6 (`short_channel_id`)
+        #    2. data:
+        #        * [`short_channel_id`:`short_channel_id`]
+        b = BytesIO()
+        b.write(struct.pack("!Q", int(block) << 40 | int(tx) << 16 | int(out)))
+        payload.add_field(6, b.getvalue())
+        return payload.to_bytes().hex()
+
+    def serialize_payload_final_tlv(n, payment_secret: str):
+        payload = TlvPayload()
+        # BOLT #4:
+        #     1. type: 2 (`amt_to_forward`)
+        #     2. data:
+        #         * [`tu64`:`amt_to_forward`]
+        b = BytesIO()
+        b.write(truncate_encode(int(n['amount_msat'])))
+        payload.add_field(2, b.getvalue())
+        # BOLT #4:
+        #    1. type: 4 (`outgoing_cltv_value`)
+        #    2. data:
+        #        * [`tu32`:`outgoing_cltv_value`]
+        b = BytesIO()
+        b.write(truncate_encode(blockheight + n['delay']))
         payload.add_field(4, b.getvalue())
         # BOLT #4:
         #    1. type: 8 (`payment_data`)
@@ -2748,7 +2959,7 @@ def test_sendonion_rpc(node_factory):
         # We tell the node h about the parameters to use for n (a.k.a. h + 1)
         hops.append({
             "pubkey": h['id'],
-            "payload": serialize_payload(n)
+            "payload": serialize_payload_tlv(n)
         })
 
     # The last hop has a special payload:
@@ -2839,7 +3050,7 @@ def test_partial_payment(node_factory, bitcoind, executor):
     l1.rpc.sendpay(
         route=r134,
         payment_hash=inv['payment_hash'],
-        msatoshi=1000,
+        amount_msat=1000,
         bolt11=inv['bolt11'],
         payment_secret=paysecret,
         partid=1,
@@ -2851,7 +3062,7 @@ def test_partial_payment(node_factory, bitcoind, executor):
         l1.rpc.sendpay(
             route=r124,
             payment_hash=inv['payment_hash'],
-            msatoshi=499,
+            amount_msat=499,
             payment_secret=paysecret,
             groupid=1,
         )
@@ -2861,7 +3072,7 @@ def test_partial_payment(node_factory, bitcoind, executor):
         l1.rpc.sendpay(
             route=r124,
             payment_hash=inv['payment_hash'],
-            msatoshi=999,
+            amount_msat=999,
             bolt11=inv['bolt11'],
             payment_secret=paysecret,
             partid=2,
@@ -2872,7 +3083,7 @@ def test_partial_payment(node_factory, bitcoind, executor):
     l1.rpc.sendpay(
         route=r124,
         payment_hash=inv['payment_hash'],
-        msatoshi=1000,
+        amount_msat=1000,
         bolt11=inv['bolt11'],
         payment_secret=paysecret,
         partid=2,
@@ -2884,7 +3095,7 @@ def test_partial_payment(node_factory, bitcoind, executor):
         l1.rpc.sendpay(
             route=r124,
             payment_hash=inv['payment_hash'],
-            msatoshi=1000,
+            amount_msat=1000,
             bolt11=inv['bolt11'],
             payment_secret=paysecret,
             partid=3,
@@ -2896,7 +3107,7 @@ def test_partial_payment(node_factory, bitcoind, executor):
         l1.rpc.sendpay(
             route=r124,
             payment_hash=inv['payment_hash'],
-            msatoshi=1000,
+            amount_msat=1000,
             bolt11=inv['bolt11'],
             payment_secret=paysecret,
             partid=1,
@@ -2906,7 +3117,7 @@ def test_partial_payment(node_factory, bitcoind, executor):
     l1.rpc.sendpay(
         route=r134,
         payment_hash=inv['payment_hash'],
-        msatoshi=1000,
+        amount_msat=1000,
         bolt11=inv['bolt11'],
         payment_secret=paysecret,
         partid=1,
@@ -2916,7 +3127,7 @@ def test_partial_payment(node_factory, bitcoind, executor):
     l1.rpc.sendpay(
         route=r124,
         payment_hash=inv['payment_hash'],
-        msatoshi=1000,
+        amount_msat=1000,
         bolt11=inv['bolt11'],
         payment_secret=paysecret,
         partid=2,
@@ -2941,8 +3152,8 @@ def test_partial_payment(node_factory, bitcoind, executor):
     for i in range(2):
         line = l4.daemon.wait_for_log('print_htlc_onion.py: Got onion')
         assert "'type': 'tlv'" in line
-        assert "'forward_amount': '499msat'" in line or "'forward_amount': '501msat'" in line
-        assert "'total_msat': '1000msat'" in line
+        assert "'forward_msat': 499" in line or "'forward_msat': 501" in line
+        assert "'total_msat': 1000" in line
         assert "'payment_secret': '{}'".format(paysecret) in line
 
     pay = only_one(l1.rpc.listpays()['pays'])
@@ -2955,7 +3166,7 @@ def test_partial_payment(node_factory, bitcoind, executor):
     pay = l1.rpc.sendpay(
         route=r124,
         payment_hash=inv['payment_hash'],
-        msatoshi=1000,
+        amount_msat=1000,
         bolt11=inv['bolt11'],
         payment_secret=paysecret,
         partid=2,
@@ -2968,7 +3179,7 @@ def test_partial_payment(node_factory, bitcoind, executor):
         l1.rpc.sendpay(
             route=r124,
             payment_hash=inv['payment_hash'],
-            msatoshi=1000,
+            amount_msat=1000,
             bolt11=inv['bolt11'],
             payment_secret=paysecret,
             partid=3,
@@ -2985,7 +3196,7 @@ def test_partial_payment_timeout(node_factory, bitcoind):
     l1.rpc.sendpay(
         route=route,
         payment_hash=inv['payment_hash'],
-        msatoshi=1000,
+        amount_msat=1000,
         bolt11=inv['bolt11'],
         payment_secret=paysecret,
         partid=1,
@@ -3005,7 +3216,7 @@ def test_partial_payment_timeout(node_factory, bitcoind):
     l1.rpc.sendpay(
         route=route,
         payment_hash=inv['payment_hash'],
-        msatoshi=1000,
+        amount_msat=1000,
         bolt11=inv['bolt11'],
         payment_secret=paysecret,
         partid=1,
@@ -3014,7 +3225,7 @@ def test_partial_payment_timeout(node_factory, bitcoind):
     l1.rpc.sendpay(
         route=route,
         payment_hash=inv['payment_hash'],
-        msatoshi=1000,
+        amount_msat=1000,
         bolt11=inv['bolt11'],
         payment_secret=paysecret,
         partid=2,
@@ -3040,7 +3251,7 @@ def test_partial_payment_restart(node_factory, bitcoind):
     l1.rpc.sendpay(
         route=route,
         payment_hash=inv['payment_hash'],
-        msatoshi=1000,
+        amount_msat=1000,
         bolt11=inv['bolt11'],
         payment_secret=paysecret,
         partid=1,
@@ -3058,7 +3269,7 @@ def test_partial_payment_restart(node_factory, bitcoind):
     l1.rpc.sendpay(
         route=route,
         payment_hash=inv['payment_hash'],
-        msatoshi=1000,
+        amount_msat=1000,
         bolt11=inv['bolt11'],
         payment_secret=paysecret,
         partid=2,
@@ -3083,7 +3294,7 @@ def test_partial_payment_htlc_loss(node_factory, bitcoind):
 
     route = l1.rpc.getroute(l3.info['id'], 500, 1)['route']
 
-    l1.rpc.sendpay(route=route, payment_hash=inv['payment_hash'], msatoshi=1000, bolt11=inv['bolt11'], payment_secret=paysecret, partid=1)
+    l1.rpc.sendpay(route=route, payment_hash=inv['payment_hash'], amount_msat=1000, bolt11=inv['bolt11'], payment_secret=paysecret, partid=1)
 
     wait_for(lambda: not only_one(l2.rpc.listpeers(l3.info['id'])['peers'])['connected'])
     l2.rpc.dev_fail(l3.info['id'])
@@ -3102,19 +3313,19 @@ def test_createonion_limits(node_factory):
     hops = [{
         # privkey: 41bfd2660762506c9933ade59f1debf7e6495b10c14a92dbcd2d623da2507d3d
         "pubkey": "0266e4598d1d3c415f572a8488830b60f7e744ed9235eb0b1ba93283b315c03518",
-        "payload": "00" * 228
+        "payload": bytes([227] + [0] * 227).hex(),
     }, {
         "pubkey": "0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c",
-        "payload": "00" * 228
+        "payload": bytes([227] + [0] * 227).hex(),
     }, {
         "pubkey": "027f31ebc5462c1fdce1b737ecff52d37d75dea43ce11c74d25aa297165faa2007",
-        "payload": "00" * 228
+        "payload": bytes([227] + [0] * 227).hex(),
     }, {
         "pubkey": "032c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991",
-        "payload": "00" * 228
+        "payload": bytes([227] + [0] * 227).hex(),
     }, {
         "pubkey": "02edabbd16b41c8371b92ef2f04c1185b4f03b6dcd52ba9b78d9d7c89c8f221145",
-        "payload": "00" * 228
+        "payload": bytes([227] + [0] * 227).hex(),
     }]
 
     # This should success since it's right at the edge
@@ -3122,7 +3333,7 @@ def test_createonion_limits(node_factory):
 
     # This one should fail however
     with pytest.raises(RpcError, match=r'Payloads exceed maximum onion packet size.'):
-        hops[0]['payload'] += '01'
+        hops[0]['payload'] = bytes([228] + [0] * 228).hex()
         l1.rpc.createonion(hops=hops, assocdata="BB" * 32)
 
     # But with a larger onion, it will work!
@@ -3180,7 +3391,7 @@ def test_blockheight_disagreement(node_factory, bitcoind, executor):
 
     # Have l1 pay l2
     def pay(l1, inv):
-        l1.rpc.dev_pay(inv, use_shadow=False)
+        l1.dev_pay(inv, use_shadow=False)
     fut = executor.submit(pay, l1, inv)
 
     # Make sure l1 sends out the HTLC.
@@ -3209,18 +3420,18 @@ caused a crash in 0.8.0, so we then disallowed it.
     with pytest.raises(RpcError, match=r'Do not specify msatoshi \(1001msat\) without'
                        ' partid: if you do, it must be exactly'
                        r' the final amount \(1000msat\)'):
-        l1.rpc.sendpay(route=l1.rpc.getroute(l2.info['id'], 1000, 1)['route'], payment_hash=inv['payment_hash'], msatoshi=1001, bolt11=inv['bolt11'], payment_secret=inv['payment_secret'])
+        l1.rpc.sendpay(route=l1.rpc.getroute(l2.info['id'], 1000, 1)['route'], payment_hash=inv['payment_hash'], amount_msat=1001, bolt11=inv['bolt11'], payment_secret=inv['payment_secret'])
     with pytest.raises(RpcError, match=r'Do not specify msatoshi \(999msat\) without'
                        ' partid: if you do, it must be exactly'
                        r' the final amount \(1000msat\)'):
-        l1.rpc.sendpay(route=l1.rpc.getroute(l2.info['id'], 1000, 1)['route'], payment_hash=inv['payment_hash'], msatoshi=999, bolt11=inv['bolt11'], payment_secret=inv['payment_secret'])
+        l1.rpc.sendpay(route=l1.rpc.getroute(l2.info['id'], 1000, 1)['route'], payment_hash=inv['payment_hash'], amount_msat=999, bolt11=inv['bolt11'], payment_secret=inv['payment_secret'])
 
     # Can't send MPP payment which pays any more than amount.
     with pytest.raises(RpcError, match=r'Final amount 1001msat is greater than 1000msat, despite MPP'):
-        l1.rpc.sendpay(route=l1.rpc.getroute(l2.info['id'], 1001, 1)['route'], payment_hash=inv['payment_hash'], msatoshi=1000, bolt11=inv['bolt11'], partid=1, payment_secret=inv['payment_secret'])
+        l1.rpc.sendpay(route=l1.rpc.getroute(l2.info['id'], 1001, 1)['route'], payment_hash=inv['payment_hash'], amount_msat=1000, bolt11=inv['bolt11'], partid=1, payment_secret=inv['payment_secret'])
 
     # But this works
-    l1.rpc.sendpay(route=l1.rpc.getroute(l2.info['id'], 1001, 1)['route'], payment_hash=inv['payment_hash'], msatoshi=1001, bolt11=inv['bolt11'], payment_secret=inv['payment_secret'])
+    l1.rpc.sendpay(route=l1.rpc.getroute(l2.info['id'], 1001, 1)['route'], payment_hash=inv['payment_hash'], amount_msat=1001, bolt11=inv['bolt11'], payment_secret=inv['payment_secret'])
     l1.rpc.waitsendpay(inv['payment_hash'])
 
     inv = only_one(l2.rpc.listinvoices('inv')['invoices'])
@@ -3306,7 +3517,7 @@ def test_sendpay_blinding(node_factory):
     l1.rpc.waitsendpay(inv['payment_hash'])
 
 
-def test_excluded_adjacent_routehint(node_factory, bitcoind, compat):
+def test_excluded_adjacent_routehint(node_factory, bitcoind):
     """Test case where we try have a routehint which leads to an adjacent
     node, but the result exceeds our maxfee; we crashed trying to find
     what part of the path was most expensive in that case
@@ -3353,7 +3564,7 @@ def test_keysend(node_factory):
 
     inv = invs[0]
     print(inv)
-    assert(inv['msatoshi_received'] >= amt)
+    assert(inv['amount_received_msat'] >= Millisatoshi(amt))
 
     # Now send a direct one instead from l1 to l2
     l1.rpc.keysend(l2.info['id'], amt)
@@ -3361,7 +3572,7 @@ def test_keysend(node_factory):
     assert(len(invs) == 1)
 
     inv = invs[0]
-    assert(inv['msatoshi_received'] >= amt)
+    assert(inv['amount_received_msat'] >= Millisatoshi(amt))
 
     # And finally try to send a keysend payment to l4, which doesn't
     # support it. It MUST fail.
@@ -3369,34 +3580,58 @@ def test_keysend(node_factory):
         l3.rpc.keysend(l4.info['id'], amt)
 
 
-@unittest.skipIf(not EXPERIMENTAL_FEATURES, "Requires extratlvs option")
-def test_keysend_extra_tlvs(node_factory):
-    """Use the extratlvs option to deliver a message with sphinx' TLV type.
+def test_keysend_strip_tlvs(node_factory):
+    """Use the extratlvs option to deliver a message with sphinx' TLV type, which keysend strips.
     """
     amt = 10000
     l1, l2 = node_factory.line_graph(
         2,
         wait_for_announce=True,
         opts=[
-            {},
             {
-                'experimental-accept-extra-tlv-types': '133773310',
+                # Not needed, just for listconfigs test.
+                'accept-htlc-tlv-types': '133773310,99990',
+            },
+            {
                 "plugin": os.path.join(os.path.dirname(__file__), "plugins/sphinx-receiver.py"),
             },
         ]
     )
 
-    # Send an indirect one from l1 to l3
-    l1.rpc.keysend(l2.info['id'], amt, extratlvs={133773310: 'FEEDC0DE'})
-    invs = l2.rpc.listinvoices()['invoices']
-    assert(len(invs) == 1)
-    assert(l2.daemon.is_in_log(r'plugin-sphinx-receiver.py.*extratlvs.*133773310.*feedc0de'))
+    # Make sure listconfigs works here
+    assert l1.rpc.listconfigs()['accept-htlc-tlv-types'] == '133773310,99990'
 
-    inv = invs[0]
-    assert(inv['msatoshi_received'] >= amt)
+    l1.rpc.keysend(l2.info['id'], amt, extratlvs={133773310: 'FEEDC0DE'})
+    inv = only_one(l2.rpc.listinvoices()['invoices'])
+    assert not l2.daemon.is_in_log(r'plugin-sphinx-receiver.py.*extratlvs.*133773310.*feedc0de')
+
+    assert(inv['amount_received_msat'] >= Millisatoshi(amt))
+    assert inv['description'] == 'keysend'
+    l2.rpc.delinvoice(inv['label'], 'paid')
 
     # Now try again with the TLV type in extra_tlvs as string:
-    l1.rpc.keysend(l2.info['id'], amt, extratlvs={133773310: 'FEEDC0DE'})
+    l1.rpc.keysend(l2.info['id'], amt, extratlvs={133773310: b'hello there'.hex()})
+    inv = only_one(l2.rpc.listinvoices()['invoices'])
+    assert inv['description'] == 'keysend: hello there'
+    l2.daemon.wait_for_log('Keysend payment uses illegal even field 133773310: stripping')
+    l2.rpc.delinvoice(inv['label'], 'paid')
+
+    # We can (just!) fit a giant description in.
+    l1.rpc.keysend(l2.info['id'], amt, extratlvs={133773310: (b'a' * 1100).hex()})
+    inv = only_one(l2.rpc.listinvoices()['invoices'])
+    assert inv['description'] == 'keysend: ' + 'a' * 1100
+    l2.rpc.delinvoice(inv['label'], 'paid')
+    l2.daemon.wait_for_log('Keysend payment uses illegal even field 133773310: stripping')
+
+    # Now try with some special characters
+    ksinfo = """💕 ₿"'
+More info
+"""
+    # Since we're at it, use this to test string-keyed TLVs
+    l1.rpc.keysend(l2.info['id'], amt, extratlvs={"133773310": bytes(ksinfo, encoding='utf8').hex()})
+    inv = only_one(l2.rpc.listinvoices()['invoices'])
+    assert inv['description'] == 'keysend: ' + ksinfo
+    l2.daemon.wait_for_log('Keysend payment uses illegal even field 133773310: stripping')
 
 
 def test_keysend_routehint(node_factory):
@@ -3412,7 +3647,7 @@ def test_keysend_routehint(node_factory):
     routehints = [
         [
             {
-                'scid': l3.rpc.listpeers()['peers'][0]['channels'][0]['short_channel_id'],
+                'scid': l3.rpc.listpeers()['peers'][0]['channels'][0]['alias']['remote'],
                 'id': l2.info['id'],
                 'feebase': '1msat',
                 'feeprop': 10,
@@ -3432,18 +3667,18 @@ def test_keysend_routehint(node_factory):
 
     # Without any hints we should fail:
     with pytest.raises(RpcError):
-        l1.rpc.call("keysend", payload={'destination': dest, 'msatoshi': amt})
+        l1.rpc.call("keysend", payload={'destination': dest, 'amount_msat': amt})
 
     # We should also fail with only non-working hints:
     with pytest.raises(RpcError):
-        l1.rpc.call("keysend", payload={'destination': dest, 'msatoshi': amt, 'routehints': routehints[1:]})
+        l1.rpc.call("keysend", payload={'destination': dest, 'amount_msat': amt, 'routehints': routehints[1:]})
 
-    l1.rpc.call("keysend", payload={'destination': dest, 'msatoshi': amt, 'routehints': routehints})
+    l1.rpc.call("keysend", payload={'destination': dest, 'amount_msat': amt, 'routehints': routehints})
     invs = l3.rpc.listinvoices()['invoices']
     assert(len(invs) == 1)
 
     inv = invs[0]
-    assert(inv['msatoshi_received'] >= amt)
+    assert(inv['amount_received_msat'] >= Millisatoshi(amt))
 
 
 def test_invalid_onion_channel_update(node_factory):
@@ -3473,7 +3708,7 @@ def test_invalid_onion_channel_update(node_factory):
 
 
 @pytest.mark.developer("Requires use_shadow")
-def test_pay_exemptfee(node_factory, compat):
+def test_pay_exemptfee(node_factory):
     """Tiny payment, huge fee
 
     l1 -> l2 -> l3
@@ -3494,10 +3729,10 @@ def test_pay_exemptfee(node_factory, compat):
     err = r'Ran out of routes to try'
 
     with pytest.raises(RpcError, match=err):
-        l1.rpc.dev_pay(l3.rpc.invoice(1, "lbl1", "desc")['bolt11'], use_shadow=False)
+        l1.dev_pay(l3.rpc.invoice(1, "lbl1", "desc")['bolt11'], use_shadow=False)
 
     # If we tell our node that 5001msat is ok this should work
-    l1.rpc.dev_pay(l3.rpc.invoice(1, "lbl2", "desc")['bolt11'], use_shadow=False, exemptfee=5001)
+    l1.dev_pay(l3.rpc.invoice(1, "lbl2", "desc")['bolt11'], use_shadow=False, exemptfee=5001)
 
     # Given the above network this is the smallest amount that passes without
     # the fee-exemption (notice that we let it through on equality).
@@ -3505,10 +3740,10 @@ def test_pay_exemptfee(node_factory, compat):
 
     # This should be just below the fee-exemption and is the first value that is allowed through
     with pytest.raises(RpcError, match=err):
-        l1.rpc.dev_pay(l3.rpc.invoice(threshold - 1, "lbl3", "desc")['bolt11'], use_shadow=False)
+        l1.dev_pay(l3.rpc.invoice(threshold - 1, "lbl3", "desc")['bolt11'], use_shadow=False)
 
     # While this'll work just fine
-    l1.rpc.dev_pay(l3.rpc.invoice(int(5001 * 200), "lbl4", "desc")['bolt11'], use_shadow=False)
+    l1.dev_pay(l3.rpc.invoice(int(5001 * 200), "lbl4", "desc")['bolt11'], use_shadow=False)
 
 
 @pytest.mark.developer("Requires use_shadow flag")
@@ -3548,7 +3783,7 @@ def test_pay_peer(node_factory, bitcoind):
     for i in range(0, direct):
         inv = l2.rpc.invoice(amt.millisatoshis, "lbl{}".format(i),
                              "desc{}".format(i))['bolt11']
-        l1.rpc.dev_pay(inv, use_shadow=False)
+        l1.dev_pay(inv, use_shadow=False)
 
     # We should not have more than amt in the direct channel anymore
     assert(spendable(l1, l2) < amt)
@@ -3556,7 +3791,7 @@ def test_pay_peer(node_factory, bitcoind):
 
     # Next one should take the alternative, but it should still work
     inv = l2.rpc.invoice(amt.millisatoshis, "final", "final")['bolt11']
-    l1.rpc.dev_pay(inv, use_shadow=False)
+    l1.dev_pay(inv, use_shadow=False)
 
 
 def test_mpp_presplit(node_factory):
@@ -3581,7 +3816,25 @@ def test_mpp_presplit(node_factory):
     assert(p['parts'] >= 5)
     inv = l3.rpc.listinvoices()['invoices'][0]
 
-    assert(inv['msatoshi'] == inv['msatoshi_received'])
+    assert(inv['amount_msat'] == inv['amount_received_msat'])
+
+    # Make sure that bolt11 isn't duplicated for every part
+    bolt11s = 0
+    count = 0
+    for p in l1.rpc.listsendpays()['payments']:
+        if 'bolt11' in p:
+            bolt11s += 1
+        count += 1
+
+    # You were supposed to mpp!
+    assert count > 1
+    # Not every one should have the bolt11 string
+    assert bolt11s < count
+    # In fact, only one should
+    assert bolt11s == 1
+
+    # But listpays() gathers it:
+    assert only_one(l1.rpc.listpays()['pays'])['bolt11'] == inv['bolt11']
 
 
 def test_mpp_adaptive(node_factory, bitcoind):
@@ -3652,6 +3905,22 @@ def test_mpp_adaptive(node_factory, bitcoind):
     pprint(p)
     pprint(l1.rpc.paystatus(inv))
 
+    # Make sure that bolt11 isn't duplicated for every part
+    bolt11s = 0
+    count = 0
+    for p in l1.rpc.listsendpays()['payments']:
+        if 'bolt11' in p:
+            bolt11s += 1
+        count += 1
+
+    # You were supposed to mpp!
+    assert count > 1
+    # Not every one should have the bolt11 string
+    assert bolt11s < count
+
+    # listpays() shows bolt11 string
+    assert 'bolt11' in only_one(l1.rpc.listpays()['pays'])
+
 
 def test_pay_fail_unconfirmed_channel(node_factory, bitcoind):
     '''
@@ -3715,6 +3984,7 @@ def test_bolt11_null_after_pay(node_factory, bitcoind):
     assert(pays[0]["bolt11"] == invl1)
     assert('amount_msat' in pays[0] and pays[0]['amount_msat'] == amt)
     assert('created_at' in pays[0])
+    assert('completed_at' in pays[0])
 
 
 def test_mpp_presplit_routehint_conflict(node_factory, bitcoind):
@@ -3753,8 +4023,10 @@ def test_delpay_argument_invalid(node_factory, bitcoind):
     # Create the line graph l2 -> l1 with a channel of 10 ** 5 sat!
     l2, l1 = node_factory.line_graph(2, fundamount=10**5, wait_for_announce=True)
 
+    l2.rpc.check_request_schemas = False
     with pytest.raises(RpcError):
         l2.rpc.delpay()
+    l2.rpc.check_request_schemas = True
 
     # sanity check
     inv = l1.rpc.invoice(10 ** 5, 'inv', 'inv')
@@ -3769,11 +4041,13 @@ def test_delpay_argument_invalid(node_factory, bitcoind):
     payment_hash = inv['payment_hash']
 
     # payment paid with wrong status (pending status is a illegal input)
+    l2.rpc.check_request_schemas = False
     with pytest.raises(RpcError):
         l2.rpc.delpay(payment_hash, 'pending')
 
     with pytest.raises(RpcError):
         l2.rpc.delpay(payment_hash, 'invalid_status')
+    l2.rpc.check_request_schemas = True
 
     with pytest.raises(RpcError):
         l2.rpc.delpay(payment_hash, 'failed')
@@ -3830,46 +4104,6 @@ def test_listpay_result_with_paymod(node_factory, bitcoind):
     assert 'destination' in l2.rpc.listpays()['pays'][0]
 
 
-@unittest.skipIf(env('COMPAT') != 1, "legacypay requires COMPAT=1")
-def test_listpays_ongoing_attempt(node_factory, bitcoind, executor):
-    """Test to reproduce issue #3915.
-
-    The issue is that the bolt11 string is not initialized if the root payment
-    was split (no attempt with the bolt11 annotation ever hit `lightningd`,
-    hence we cannot filter by that. In addition keysends never have a bolt11
-    string, so we need to switch to payment_hash comparisons anyway.
-    """
-    plugin = os.path.join(os.path.dirname(__file__), 'plugins', 'hold_htlcs.py')
-    l1, l2, l3 = node_factory.line_graph(3, opts=[{}, {}, {'plugin': plugin}],
-                                         wait_for_announce=True)
-
-    f = executor.submit(l1.rpc.keysend, l3.info['id'], 100)
-    l3.daemon.wait_for_log(r'Holding onto an incoming htlc')
-    l1.rpc.listpays()
-    f.result()
-
-    inv = l2.rpc.invoice(10**6, 'legacy', 'desc')['bolt11']
-    l1.rpc.legacypay(inv)
-    l1.rpc.listpays()
-
-    # Produce loads of parts to increase probability of hitting the issue,
-    # should result in 100 splits at least
-    inv = l3.rpc.invoice(10**9, 'mpp invoice', 'desc')['bolt11']
-
-    # Start the payment, it'll get stuck for 10 seconds at l3
-    executor.submit(l1.rpc.pay, inv)
-    l1.daemon.wait_for_log(r'Split into [0-9]+ sub-payments due to initial size')
-    l3.daemon.wait_for_log(r'Holding onto an incoming htlc')
-
-    # While that is going on, check in with `listpays` to see if aggregation
-    # is working.
-    l1.rpc.listpays()
-
-    # Now restart and see if we still can aggregate things correctly.
-    l1.restart()
-    l1.rpc.listpays()
-
-
 def test_listsendpays_and_listpays_order(node_factory):
     """listsendpays should be in increasing id order, listpays in created_at"""
     l1, l2 = node_factory.line_graph(2)
@@ -3918,7 +4152,7 @@ def test_mpp_waitblockheight_routehint_conflict(node_factory, bitcoind, executor
 
     # Have l1 pay l3
     def pay(l1, inv):
-        l1.rpc.dev_pay(inv, use_shadow=False)
+        l1.dev_pay(inv, use_shadow=False)
     fut = executor.submit(pay, l1, inv)
 
     # Make sure l1 sends out the HTLC.
@@ -4080,7 +4314,7 @@ def test_large_mpp_presplit(node_factory):
     assert(p['parts'] <= PRESPLIT_MAX_SPLITS)
     inv = l3.rpc.listinvoices()['invoices'][0]
 
-    assert(inv['msatoshi'] == inv['msatoshi_received'])
+    assert(inv['amount_msat'] == inv['amount_received_msat'])
 
 
 @pytest.mark.developer("builds large network, which is slow if not DEVELOPER")
@@ -4146,13 +4380,13 @@ def test_offer_needs_option(node_factory):
     with pytest.raises(RpcError, match='experimental-offers not enabled'):
         l1.rpc.call('offer', {'amount': '1msat', 'description': 'test'})
     with pytest.raises(RpcError, match='experimental-offers not enabled'):
-        l1.rpc.call('offerout', {'amount': '2msat',
-                                 'description': 'simple test'})
+        l1.rpc.call('invoicerequest', {'amount': '2msat',
+                                       'description': 'simple test'})
     with pytest.raises(RpcError, match='Unknown command'):
         l1.rpc.call('fetchinvoice', {'offer': 'aaaa'})
 
     # Decode still works though
-    assert l1.rpc.decode('lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzrcgqyys5qq7ypnwgkvdr57yzh6h92zg3qctvrm7w38djg67kzcm4yeg8vc4cq633uzqaxlsxzxergsrav494jjrpuy9hcldjeglha57lxvz20fhha6hjwhv69nnzwzjsajntyf0c4z8h9e70dfdlfq8jdvc9rdht8vr955udtg')['valid']
+    assert l1.rpc.decode('lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzrcgqyqs5pr5v4ehg93pqfnwgkvdr57yzh6h92zg3qctvrm7w38djg67kzcm4yeg8vc4cq63s')['valid']
 
 
 def test_offer(node_factory, bitcoind):
@@ -4171,17 +4405,10 @@ def test_offer(node_factory, bitcoind):
         offer = only_one(l1.rpc.call('listoffers', [ret['offer_id']])['offers'])
 
         assert offer['bolt12'] == ret['bolt12']
-        assert offer['bolt12_unsigned'] == ret['bolt12_unsigned']
         assert offer['offer_id'] == ret['offer_id']
 
         output = subprocess.check_output([bolt12tool, 'decode',
                                           offer['bolt12']]).decode('ASCII')
-        if amount == 'any':
-            assert 'amount' not in output
-        else:
-            assert 'amount' in output
-        output = subprocess.check_output([bolt12tool, 'decode',
-                                          offer['bolt12_unsigned']]).decode('ASCII')
         if amount == 'any':
             assert 'amount' not in output
         else:
@@ -4225,14 +4452,14 @@ def test_offer(node_factory, bitcoind):
                                       offer['bolt12']]).decode('UTF-8')
     assert 'issuer: ' + weird_issuer in output
 
-    # Test quantity min/max
+    # Test quantity
     ret = l1.rpc.call('offer', {'amount': '100000sat',
-                                'description': 'quantity_min test',
-                                'quantity_min': 1})
+                                'description': 'quantity_max existence test',
+                                'quantity_max': 0})
     offer = only_one(l1.rpc.call('listoffers', [ret['offer_id']])['offers'])
     output = subprocess.check_output([bolt12tool, 'decode',
                                       offer['bolt12']]).decode('UTF-8')
-    assert 'quantity_min: 1' in output
+    assert 'quantity_max: 0' in output
 
     ret = l1.rpc.call('offer', {'amount': '100000sat',
                                 'description': 'quantity_max test',
@@ -4241,26 +4468,6 @@ def test_offer(node_factory, bitcoind):
     output = subprocess.check_output([bolt12tool, 'decode',
                                       offer['bolt12']]).decode('UTF-8')
     assert 'quantity_max: 2' in output
-
-    # BOLT-offers #12:
-    # 	 * - MUST NOT set `quantity_min` or `quantity_max` less than 1.
-    with pytest.raises(RpcError, match='quantity_min: must be >= 1'):
-        ret = l1.rpc.call('offer', {'amount': '100000sat',
-                                    'description': 'quantity_min test',
-                                    'quantity_min': 0})
-
-    with pytest.raises(RpcError, match='quantity_max: must be >= 1'):
-        ret = l1.rpc.call('offer', {'amount': '100000sat',
-                                    'description': 'quantity_max test',
-                                    'quantity_max': 0})
-    # BOLT-offers #12:
-    # - if both:
-    #    - MUST set `quantity_min` greater or equal to `quantity_max`.
-    with pytest.raises(RpcError, match='quantity_min: must be <= quantity_max'):
-        ret = l1.rpc.call('offer', {'amount': '100000sat',
-                                    'description': 'quantity_max test',
-                                    'quantity_min': 10,
-                                    'quantity_max': 9})
 
     # Test absolute_expiry
     exp = int(time.time() + 2)
@@ -4359,27 +4566,6 @@ def test_fetchinvoice_3hop(node_factory, bitcoind):
 
     l1.rpc.call('fetchinvoice', {'offer': offer1['bolt12']})
 
-    # Make sure l4 handled both onions before shutting down
-    l1.daemon.wait_for_log(r'plugin-fetchinvoice: Received modern onion .*obs2\\":false')
-    l1.daemon.wait_for_log(r'plugin-fetchinvoice: No match for modern onion.*obs2\\":true')
-
-    # Test with obsolete onion.
-    l4.stop()
-    l4.daemon.opts['dev-no-modern-onion'] = None
-    l4.start()
-    l4.rpc.connect(l3.info['id'], 'localhost', l3.port)
-
-    l1.rpc.call('fetchinvoice', {'offer': offer1['bolt12']})
-
-    # Test with modern onion.
-    l4.stop()
-    del l4.daemon.opts['dev-no-modern-onion']
-    l4.daemon.opts['dev-no-obsolete-onion'] = None
-    l4.start()
-    l4.rpc.connect(l3.info['id'], 'localhost', l3.port)
-
-    l1.rpc.call('fetchinvoice', {'offer': offer1['bolt12']})
-
 
 def test_fetchinvoice(node_factory, bitcoind):
     # We remove the conversion plugin on l3, causing it to get upset.
@@ -4395,7 +4581,7 @@ def test_fetchinvoice(node_factory, bitcoind):
     assert offer1['created'] is True
 
     inv1 = l1.rpc.call('fetchinvoice', {'offer': offer1['bolt12']})
-    inv2 = l1.rpc.call('fetchinvoice', {'offer': offer1['bolt12_unsigned'],
+    inv2 = l1.rpc.call('fetchinvoice', {'offer': offer1['bolt12'],
                                         'payer_note': 'Thanks for the fish!'})
     assert inv1 != inv2
     assert 'next_period' not in inv1
@@ -4409,32 +4595,32 @@ def test_fetchinvoice(node_factory, bitcoind):
     # listinvoices will show these on l3
     assert [x['local_offer_id'] for x in l3.rpc.listinvoices()['invoices']] == [offer1['offer_id'], offer1['offer_id']]
 
-    assert 'payer_note' not in only_one(l3.rpc.call('listinvoices', {'invstring': inv1['invoice']})['invoices'])
-    assert only_one(l3.rpc.call('listinvoices', {'invstring': inv2['invoice']})['invoices'])['payer_note'] == 'Thanks for the fish!'
+    assert 'invreq_payer_note' not in only_one(l3.rpc.call('listinvoices', {'invstring': inv1['invoice']})['invoices'])
+    assert only_one(l3.rpc.call('listinvoices', {'invstring': inv2['invoice']})['invoices'])['invreq_payer_note'] == 'Thanks for the fish!'
 
     # BTW, test listinvoices-by-offer_id:
     assert len(l3.rpc.listinvoices(offer_id=offer1['offer_id'])['invoices']) == 2
 
     # We can also set the amount explicitly, to tip.
-    inv1 = l1.rpc.call('fetchinvoice', {'offer': offer1['bolt12'], 'msatoshi': 3})
-    assert l1.rpc.call('decode', [inv1['invoice']])['amount_msat'] == 3
+    inv1 = l1.rpc.call('fetchinvoice', {'offer': offer1['bolt12'], 'amount_msat': 3})
+    assert l1.rpc.call('decode', [inv1['invoice']])['invoice_amount_msat'] == 3
     l1.rpc.pay(inv1['invoice'])
 
     # More than ~5x expected is rejected as absurd (it's actually a divide test,
     # which means we need 15 here, not 11).
     with pytest.raises(RpcError, match="Remote node sent failure message.*Amount vastly exceeds 2msat"):
-        l1.rpc.call('fetchinvoice', {'offer': offer1['bolt12'], 'msatoshi': 15})
+        l1.rpc.call('fetchinvoice', {'offer': offer1['bolt12'], 'amount_msat': 15})
 
     # Underpay is rejected.
     with pytest.raises(RpcError, match="Remote node sent failure message.*Amount must be at least 2msat"):
-        l1.rpc.call('fetchinvoice', {'offer': offer1['bolt12'], 'msatoshi': 1})
+        l1.rpc.call('fetchinvoice', {'offer': offer1['bolt12'], 'amount_msat': 1})
 
     # If no amount is specified in offer, one must be in invoice.
     offer_noamount = l3.rpc.call('offer', {'amount': 'any',
                                            'description': 'any amount test'})
     with pytest.raises(RpcError, match="msatoshi parameter required"):
         l1.rpc.call('fetchinvoice', {'offer': offer_noamount['bolt12']})
-    inv1 = l1.rpc.call('fetchinvoice', {'offer': offer_noamount['bolt12'], 'msatoshi': 100})
+    inv1 = l1.rpc.call('fetchinvoice', {'offer': offer_noamount['bolt12'], 'amount_msat': 100})
     # But amount won't appear in changes
     assert 'msat' not in inv1['changes']
 
@@ -4452,7 +4638,8 @@ def test_fetchinvoice(node_factory, bitcoind):
     l1.rpc.pay(inv1['invoice'])
 
     # We can't pay the other one now.
-    with pytest.raises(RpcError, match="INCORRECT_OR_UNKNOWN_PAYMENT_DETAILS.*'erring_node': '{}'".format(l3.info['id'])):
+    # FIXME: Even dummy blinded paths always return WIRE_INVALID_ONION_BLINDING!
+    with pytest.raises(RpcError, match="INVALID_ONION_BLINDING.*'erring_node': '{}'".format(l3.info['id'])):
         l1.rpc.pay(inv2['invoice'])
 
     # We can't reuse the offer, either.
@@ -4530,7 +4717,7 @@ def test_fetchinvoice(node_factory, bitcoind):
                                      'description': 'USD test'})['bolt12']
 
     inv = l1.rpc.call('fetchinvoice', {'offer': offerusd})
-    assert inv['changes']['msat'] == Millisatoshi(int(10.05 * 5000))
+    assert inv['changes']['amount_msat'] == Millisatoshi(int(10.05 * 5000))
 
     # If we remove plugin, it can no longer give us an invoice.
     l3.rpc.plugin_stop(plugin)
@@ -4546,7 +4733,7 @@ def test_fetchinvoice(node_factory, bitcoind):
                                    'description': 'simple test'})
     assert offer1['created'] is False
     l3.rpc.call('disableoffer', {'offer_id': offer1['offer_id']})
-    with pytest.raises(RpcError, match="1000.*Offer already exists, but isn't active"):
+    with pytest.raises(RpcError, match="1000.*Already exists, but isn't active"):
         l3.rpc.call('offer', {'amount': '2msat',
                               'description': 'simple test'})
 
@@ -4616,13 +4803,13 @@ def test_fetchinvoice_autoconnect(node_factory, bitcoind):
     l3.rpc.call('fetchinvoice', {'offer': offer['bolt12']})
     assert l3.rpc.listpeers(l2.info['id'])['peers'] != []
 
-    # Similarly for send-invoice offer.
+    # Similarly for an invoice_request.
     l3.rpc.disconnect(l2.info['id'])
-    offer = l2.rpc.call('offerout', {'amount': '2msat',
-                                     'description': 'simple test'})
+    invreq = l2.rpc.call('invoicerequest', {'amount': '2msat',
+                                            'description': 'simple test'})
     # Ofc l2 can't actually pay it!
     with pytest.raises(RpcError, match='pay attempt failed: "Ran out of routes to try'):
-        l3.rpc.call('sendinvoice', {'offer': offer['bolt12'], 'label': 'payme!'})
+        l3.rpc.call('sendinvoice', {'invreq': invreq['bolt12'], 'label': 'payme!'})
 
     assert l3.rpc.listpeers(l2.info['id'])['peers'] != []
 
@@ -4636,7 +4823,7 @@ def test_fetchinvoice_autoconnect(node_factory, bitcoind):
     wait_for(lambda: only_one(only_one(l2.rpc.listpeers(l1.info['id'])['peers'])['channels'])['spendable_msat'] != Millisatoshi(0))
 
     l3.rpc.disconnect(l2.info['id'])
-    l3.rpc.call('sendinvoice', {'offer': offer['bolt12'], 'label': 'payme for real!'})
+    l3.rpc.call('sendinvoice', {'invreq': invreq['bolt12'], 'label': 'payme for real!'})
     # It will have autoconnected, to send invoice (since l1 says it doesn't do onion messages!)
     assert l3.rpc.listpeers(l2.info['id'])['peers'] != []
 
@@ -4676,27 +4863,29 @@ def test_dev_rawrequest(node_factory):
     assert 'invoice' in ret
 
 
-def do_test_sendinvoice(node_factory, bitcoind, disable):
+def test_sendinvoice(node_factory, bitcoind):
     l2opts = {'experimental-offers': None}
-    if disable:
-        l2opts[disable] = None
     l1, l2 = node_factory.line_graph(2, wait_for_announce=True,
                                      opts=[{'experimental-offers': None},
                                            l2opts])
 
     # Simple offer to send money (balances channel a little)
-    offer = l1.rpc.call('offerout', {'amount': '100000sat',
-                                     'description': 'simple test'})
+    invreq = l1.rpc.call('invoicerequest', {'amount': '100000sat',
+                                            'description': 'simple test'})
 
-    # Fetchinvoice will refuse, since you're supposed to send an invoice.
-    with pytest.raises(RpcError, match='Offer wants an invoice, not invoice_request'):
-        l2.rpc.call('fetchinvoice', {'offer': offer['bolt12']})
+    # Fetchinvoice will refuse, since it's not an offer.
+    with pytest.raises(RpcError, match='unexpected prefix lnr'):
+        l2.rpc.call('fetchinvoice', {'offer': invreq['bolt12']})
+
+    # Pay will refuse, since it's not an invoice.
+    with pytest.raises(RpcError, match='unexpected prefix lnr'):
+        l2.rpc.call('fetchinvoice', {'offer': invreq['bolt12']})
 
     # used will be false
-    assert only_one(l1.rpc.call('listoffers', [offer['offer_id']])['offers'])['used'] is False
+    assert only_one(l1.rpc.call('listinvoicerequests', [invreq['invreq_id']])['invoicerequests'])['used'] is False
 
     # sendinvoice should work.
-    out = l2.rpc.call('sendinvoice', {'offer': offer['bolt12_unsigned'],
+    out = l2.rpc.call('sendinvoice', {'invreq': invreq['bolt12'],
                                       'label': 'test sendinvoice 1'})
     assert out['label'] == 'test sendinvoice 1'
     assert out['description'] == 'simple test'
@@ -4705,46 +4894,26 @@ def do_test_sendinvoice(node_factory, bitcoind, disable):
     assert out['status'] == 'paid'
     assert 'payment_preimage' in out
     assert 'expires_at' in out
-    assert out['msatoshi'] == 100000000
     assert out['amount_msat'] == Millisatoshi(100000000)
     assert 'pay_index' in out
-    assert out['msatoshi_received'] == 100000000
     assert out['amount_received_msat'] == Millisatoshi(100000000)
 
     # Note, if we're slow, this fails with "Offer no longer available",
     # *but* if it hasn't heard about payment success yet, l2 will fail
     # simply because payments are already pending.
-    with pytest.raises(RpcError, match='Offer no longer available|pay attempt failed'):
-        l2.rpc.call('sendinvoice', {'offer': offer['bolt12'],
+    with pytest.raises(RpcError, match='no longer available|pay attempt failed'):
+        l2.rpc.call('sendinvoice', {'invreq': invreq['bolt12'],
                                     'label': 'test sendinvoice 2'})
 
     # Technically, l1 may not have gotten payment success, so we need to wait.
-    wait_for(lambda: only_one(l1.rpc.call('listoffers', [offer['offer_id']])['offers'])['used'] is True)
+    wait_for(lambda: only_one(l1.rpc.call('listinvoicerequests', [invreq['invreq_id']])['invoicerequests'])['used'] is True)
 
-    # Now try a refund.
-    offer = l2.rpc.call('offer', {'amount': '100msat',
-                                  'description': 'simple test'})
-    assert only_one(l2.rpc.call('listoffers', [offer['offer_id']])['offers'])['used'] is False
+    # Offer with issuer: we must copy issuer into our invoice!
+    invreq = l1.rpc.call('invoicerequest', {'amount': '10000sat',
+                                            'description': 'simple test',
+                                            'issuer': "clightning test suite"})
 
-    inv = l1.rpc.call('fetchinvoice', {'offer': offer['bolt12']})
-    l1.rpc.pay(inv['invoice'])
-    assert only_one(l2.rpc.call('listoffers', [offer['offer_id']])['offers'])['used'] is True
-
-    refund = l2.rpc.call('offerout', {'amount': '100msat',
-                                      'description': 'refund test',
-                                      'refund_for': inv['invoice']})
-    assert only_one(l2.rpc.call('listoffers', [refund['offer_id']])['offers'])['used'] is False
-
-    l1.rpc.call('sendinvoice', {'offer': refund['bolt12'],
-                                'label': 'test sendinvoice refund'})
-    wait_for(lambda: only_one(l2.rpc.call('listoffers', [refund['offer_id']])['offers'])['used'] is True)
-
-    # Offer with issuer: we must not copy issuer into our invoice!
-    offer = l1.rpc.call('offerout', {'amount': '10000sat',
-                                     'description': 'simple test',
-                                     'issuer': "clightning test suite"})
-
-    out = l2.rpc.call('sendinvoice', {'offer': offer['bolt12'],
+    out = l2.rpc.call('sendinvoice', {'invreq': invreq['bolt12'],
                                       'label': 'test sendinvoice 3'})
     assert out['label'] == 'test sendinvoice 3'
     assert out['description'] == 'simple test'
@@ -4754,25 +4923,9 @@ def do_test_sendinvoice(node_factory, bitcoind, disable):
     assert out['status'] == 'paid'
     assert 'payment_preimage' in out
     assert 'expires_at' in out
-    assert out['msatoshi'] == 10000000
     assert out['amount_msat'] == Millisatoshi(10000000)
     assert 'pay_index' in out
-    assert out['msatoshi_received'] == 10000000
     assert out['amount_received_msat'] == Millisatoshi(10000000)
-
-
-def test_sendinvoice(node_factory, bitcoind):
-    do_test_sendinvoice(node_factory, bitcoind, None)
-
-
-@pytest.mark.developer("needs to --dev-no-obsolete-onion")
-def test_sendinvoice_modern(node_factory, bitcoind):
-    do_test_sendinvoice(node_factory, bitcoind, 'dev-no-obsolete-onion')
-
-
-@pytest.mark.developer("needs to --dev-no-modern-onion")
-def test_sendinvoice_obsolete(node_factory, bitcoind):
-    do_test_sendinvoice(node_factory, bitcoind, 'dev-no-modern-onion')
 
 
 def test_self_pay(node_factory):
@@ -4864,7 +5017,8 @@ gives a routehint straight to us causes an issue
 
     inv = l3.rpc.invoice(10, "test", "test")['bolt11']
     decoded = l3.rpc.decodepay(inv)
-    assert(only_one(only_one(decoded['routes']))['short_channel_id'] == scid23)
+    assert(only_one(only_one(decoded['routes']))['short_channel_id']
+           == only_one(only_one(l3.rpc.listpeers()['peers'])['channels'])['alias']['remote'])
 
     l3.stop()
     with pytest.raises(RpcError, match=r'Destination .* is not reachable directly and all routehints were unusable'):
@@ -4883,7 +5037,7 @@ def test_pay_low_max_htlcs(node_factory):
     )
 
 
-def test_setchannelfee_enforcement_delay(node_factory, bitcoind):
+def test_setchannel_enforcement_delay(node_factory, bitcoind):
     # Fees start at 1msat + 1%
     l1, l2, l3 = node_factory.line_graph(3, wait_for_announce=True,
                                          opts={'fee-base': 1,
@@ -4892,11 +5046,11 @@ def test_setchannelfee_enforcement_delay(node_factory, bitcoind):
     chanid1 = only_one(l1.rpc.getpeer(l2.info['id'])['channels'])['short_channel_id']
     chanid2 = only_one(l2.rpc.getpeer(l3.info['id'])['channels'])['short_channel_id']
 
-    route = [{'msatoshi': 1011,
+    route = [{'amount_msat': 1011,
               'id': l2.info['id'],
               'delay': 20,
               'channel': chanid1},
-             {'msatoshi': 1000,
+             {'amount_msat': 1000,
               'id': l3.info['id'],
               'delay': 10,
               'channel': chanid2}]
@@ -4909,7 +5063,7 @@ def test_setchannelfee_enforcement_delay(node_factory, bitcoind):
     l1.rpc.waitsendpay(inv['payment_hash'])
 
     # Increase fee immediately; l1 payment rejected.
-    l2.rpc.setchannelfee("all", 2, 10000, 0)
+    l2.rpc.setchannel("all", 2, 10000, enforcedelay=0)
 
     inv = l3.rpc.invoice(1000, "test2", "test2")
     l1.rpc.sendpay(route,
@@ -4919,7 +5073,7 @@ def test_setchannelfee_enforcement_delay(node_factory, bitcoind):
         l1.rpc.waitsendpay(inv['payment_hash'])
 
     # Test increased amount.
-    route[0]['msatoshi'] += 1
+    route[0]['amount_msat'] += 1
     inv = l3.rpc.invoice(1000, "test3", "test3")
     l1.rpc.sendpay(route,
                    payment_hash=inv['payment_hash'],
@@ -4927,7 +5081,7 @@ def test_setchannelfee_enforcement_delay(node_factory, bitcoind):
     l1.rpc.waitsendpay(inv['payment_hash'])
 
     # Now, give us 30 seconds please.
-    l2.rpc.setchannelfee("all", 3, 10000, 30)
+    l2.rpc.setchannel("all", 3, 10000, enforcedelay=30)
     inv = l3.rpc.invoice(1000, "test4", "test4")
     l1.rpc.sendpay(route,
                    payment_hash=inv['payment_hash'],
@@ -4981,20 +5135,20 @@ def test_sendpay_grouping(node_factory, bitcoind):
     )
     wait_for(lambda: len(l1.rpc.listnodes()['nodes']) == 3)
 
-    inv = l3.rpc.invoice(msatoshi='any', label='lbl1', description='desc')['bolt11']
+    inv = l3.rpc.invoice(amount_msat='any', label='lbl1', description='desc')['bolt11']
     l3.stop()  # Stop recipient so the first attempt fails
 
     assert(len(l1.db.query("SELECT * FROM payments")) == 0)
     assert(len(l1.rpc.listpays()['pays']) == 0)
 
     with pytest.raises(RpcError, match=r'Ran out of routes to try after [0-9]+ attempts'):
-        l1.rpc.pay(inv, msatoshi='100000msat')
+        l1.rpc.pay(inv, amount_msat='100000msat')
 
     # After this one invocation we have one entry in `listpays`
     assert(len(l1.rpc.listpays()['pays']) == 1)
 
     with pytest.raises(RpcError, match=r'Ran out of routes to try after [0-9]+ attempts'):
-        l1.rpc.pay(inv, msatoshi='200000msat')
+        l1.rpc.pay(inv, amount_msat='200000msat')
 
     # Surprise: we should have 2 entries after 2 invocations
     assert(len(l1.rpc.listpays()['pays']) == 2)
@@ -5007,7 +5161,7 @@ def test_sendpay_grouping(node_factory, bitcoind):
     wait_for(lambda: only_one(l3.rpc.listpeers()['peers'])['connected'] is True)
     scid = l3.rpc.listpeers()['peers'][0]['channels'][0]['short_channel_id']
     wait_for(lambda: [c['active'] for c in l1.rpc.listchannels(scid)['channels']] == [True, True])
-    l1.rpc.pay(inv, msatoshi='420000msat')
+    l1.rpc.pay(inv, amount_msat='420000msat')
 
     # And finally we should have all 3 attempts to pay the invoice
     pays = l1.rpc.listpays()['pays']
@@ -5024,7 +5178,7 @@ def test_pay_manual_exclude(node_factory, bitcoind):
     chan23 = l2.rpc.listpeers(l3_id)['peers'][0]['channels'][0]
     scid12 = chan12['short_channel_id'] + '/' + str(chan12['direction'])
     scid23 = chan23['short_channel_id'] + '/' + str(chan23['direction'])
-    inv = l3.rpc.invoice(msatoshi='123000', label='label1', description='desc')['bolt11']
+    inv = l3.rpc.invoice(amount_msat=123000, label='label1', description='desc')['bolt11']
     # Exclude the payer node id
     with pytest.raises(RpcError, match=r'Payer is manually excluded'):
         l1.rpc.pay(inv, exclude=[l1_id])
@@ -5040,3 +5194,110 @@ def test_pay_manual_exclude(node_factory, bitcoind):
     # Exclude direct channel id
     with pytest.raises(RpcError, match=r'is not reachable directly and all routehints were unusable.'):
         l2.rpc.pay(inv, exclude=[scid23])
+
+
+@unittest.skipIf(TEST_NETWORK != 'regtest', "Invoice is network specific")
+def test_pay_bolt11_metadata(node_factory, bitcoind):
+    l1, l2 = node_factory.line_graph(2)
+
+    # BOLT #11:
+    # > ### Please send 0.01 BTC with payment metadata 0x01fafaf0
+    # > lnbc10m1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdp9wpshjmt9de6zqmt9w3skgct5vysxjmnnd9jx2mq8q8a04uqsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygs9q2gqqqqqqsgq7hf8he7ecf7n4ffphs6awl9t6676rrclv9ckg3d3ncn7fct63p6s365duk5wrk202cfy3aj5xnnp5gs3vrdvruverwwq7yzhkf5a3xqpd05wjc
+
+    b11 = l1.rpc.decode('lnbc10m1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdp9wpshjmt9de6zqmt9w3skgct5vysxjmnnd9jx2mq8q8a04uqsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygs9q2gqqqqqqsgq7hf8he7ecf7n4ffphs6awl9t6676rrclv9ckg3d3ncn7fct63p6s365duk5wrk202cfy3aj5xnnp5gs3vrdvruverwwq7yzhkf5a3xqpd05wjc')
+    assert b11['payment_metadata'] == '01fafaf0'
+
+    # I previously hacked lightningd to add "this is metadata" to metadata.
+    # After CI started failing, I *also* hacked it to set expiry to BIGNUM.
+    inv = "lnbcrt1230n1p3yzgcxsp5q8g040f9rl9mu2unkjuj0vn262s6nyrhz5hythk3ueu2lfzahmzspp5ve584t0cv27hwmy0cx9ca8uwyqyfw9y9dm3r8vus9fv36r2l9yjsdq8v3jhxccmq6w35xjueqd9ejqmt9w3skgct5vyxqxra2q2qcqp99q2sqqqqqysgqfw6efxpzk5x5vfj8se46yg667x5cvhyttnmuqyk0q7rmhx3gs249qhtdggnek8c5adm2pztkjddlwyn2art2zg9xap2ckczzl3fzz4qqsej6mf"
+    # Make l2 "know" about this invoice.
+    l2.rpc.invoice(amount_msat=123000, label='label1', description='desc', preimage='00' * 32)
+
+    with pytest.raises(RpcError, match=r'WIRE_INVALID_ONION_PAYLOAD'):
+        l1.rpc.pay(inv)
+
+    l2.daemon.wait_for_log("Unexpected payment_metadata {}".format(b'this is metadata'.hex()))
+
+
+@pytest.mark.developer("needs to dev-disconnect")
+def test_pay_middle_fail(node_factory, bitcoind, executor):
+    """Test the case where a HTLC is failed, but not on peer's side, then
+    we go onchain"""
+    # Set feerates the same so we don't have update_fee interfering.
+    # We want to disconnect on revoke-and-ack we send for failing htlc.
+    l1, l2, l3 = node_factory.line_graph(3, wait_for_announce=True,
+                                         opts=[{'feerates': (1500,) * 4},
+                                               {'feerates': (1500,) * 4},
+                                               {'feerates': (1500,) * 4,
+                                                'disconnect': ['-WIRE_REVOKE_AND_ACK*2']}])
+
+    chanid12 = only_one(l1.rpc.getpeer(l2.info['id'])['channels'])['short_channel_id']
+    chanid23 = only_one(l2.rpc.getpeer(l3.info['id'])['channels'])['short_channel_id']
+
+    # Make a failing payment.
+    route = [{'amount_msat': 1011,
+              'id': l2.info['id'],
+              'delay': 20,
+              'channel': chanid12},
+             {'amount_msat': 1000,
+              'id': l3.info['id'],
+              'delay': 10,
+              'channel': chanid23}]
+
+    # Start payment, it will fail.
+    l1.rpc.sendpay(route, payment_hash='00' * 32)
+
+    wait_for(lambda: only_one(l3.rpc.listpeers(l2.info['id'])['peers'])['connected'] is False)
+
+    # After this (cltv is actually +11, and we give it 1 block grace)
+    # l2 will go onchain since HTLC is not resolved.
+    bitcoind.generate_block(12)
+    sync_blockheight(bitcoind, [l1, l2, l3])
+    wait_for(lambda: only_one(only_one(l2.rpc.listpeers(l3.info['id'])['peers'])['channels'])['state'] == 'AWAITING_UNILATERAL')
+
+    # Three blocks and it will resolve the parent.
+    bitcoind.generate_block(3, wait_for_mempool=1)
+
+    # And that will fail upstream
+    with pytest.raises(RpcError, match=r'WIRE_INCORRECT_OR_UNKNOWN_PAYMENT_DETAILS'):
+        l1.rpc.waitsendpay('00' * 32)
+
+
+def test_sendpay_dual_amounts(node_factory):
+    """Test that handing *both* msatoshi and amount_msat to sendpay works"""
+    l1 = node_factory.get_node(options={'allow-deprecated-apis': True})
+
+    route = [{'amount_msat': 1011,
+              'msatoshi': 1011,
+              'id': '022d223620a359a47ff7f7ac447c85c46c923da53389221a0054c11c1e3ca31d59',
+              'delay': 20,
+              'channel': '1x1x1'},
+             {'amount_msat': 1000,
+              'msatoshi': 1000,
+              'id': '035d2b1192dfba134e10e540875d366ebc8bc353d5aa766b80c090b39c3a5d885d',
+              'delay': 10,
+              'channel': '2x2x2'}]
+    l1.rpc.check("sendpay", route=route, payment_hash="00" * 32)
+
+    with pytest.raises(RpcError, match=r'No connection to first peer found'):
+        l1.rpc.sendpay(route=route, payment_hash="00" * 32)
+
+
+@unittest.skipIf(TEST_NETWORK != 'regtest', "Invoice is network specific")
+@pytest.mark.developer("needs createinvoicerequest which allows unsigned invoice containing payerinfo")
+@pytest.mark.slow_test
+def test_payerkey(node_factory):
+    """payerkey calculation should not change across releases!"""
+    nodes = node_factory.get_nodes(7)
+
+    expected_keys = ["02294ec1cd3f100947fe859d71a42cb87932e36e7771abf2d50b02a7a92be8e4d5",
+                     "026a4a3b6b0c694da6f14629ca5140713fc703591a6d8aae5c79ba9b5556fc5723",
+                     "03defd2b1f3004b0145351f469f34512c6fa4d02fe891a977bafdb34fe7b73ea48",
+                     "03eccb00c0a3c760465bb69a6297d7cfa5bcbd989d5a88e435bd8d6e4c723013cd",
+                     "021b4bfa652f0df7498d734b0ca888b4e3b07f59e1a974ec7d4a9d6046e8e5ab92",
+                     "03fc91d60b061e517f9182e3e40ea14c27df520c51db204f1409ff50e5cf9a5e4d",
+                     "03a3bbda0137722ba62207b9d3e5e6cc2a11e58480f801892093e01383aacb7fb2"]
+
+    for n, k in zip(nodes, expected_keys):
+        b12 = n.rpc.createinvoicerequest('lnr1qqgz2d7u2smys9dc5q2447e8thjlgq3qqc3xu3s3rg94nj40zfsy866mhu5vxne6tcej5878k2mneuvgjy8ssqvepgz5zsjrg3z3vggzvkm2khkgvrxj27r96c00pwl4kveecdktm29jdd6w0uwu5jgtv5v9qgqxyfhyvyg6pdvu4tcjvpp7kkal9rp57wj7xv4pl3ajku70rzy3pu', False)['bolt12']
+        assert n.rpc.decode(b12)['invreq_payer_id'] == k

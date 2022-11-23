@@ -264,6 +264,9 @@ It is formatted according to the Type-Length-Value format defined in [BOLT #1](0
     2. data:
         * [`32*byte`:`payment_secret`]
         * [`tu64`:`total_msat`]
+    1. type: 16 (`payment_metadata`)
+    2. data:
+        * [`...*byte`:`payment_metadata`]
 
 ### Requirements
 
@@ -281,6 +284,9 @@ The writer:
       - MUST include `payment_data`
       - MUST set `payment_secret` to the one provided
       - MUST set `total_msat` to the total amount it will send
+    - if the recipient provided `payment_metadata`:
+      - MUST include `payment_metadata` with every HTLC
+      - MUST not apply any limits to the size of payment_metadata except the limits implied by the fixed onion size
 
 The reader:
   - MUST return an error if `amt_to_forward` or `outgoing_cltv_value` are not present.
@@ -302,6 +308,9 @@ Note that `amt_to_forward` is the amount for this HTLC only: a
 ultimate sender that the rest of the payment will follow in succeeding
 HTLCs; we call these outstanding HTLCs which have the same preimage,
 an "HTLC set".
+
+`payment_metadata` is to be included in every payment part, so that
+invalid payment details can be detected as early as possible.
 
 #### Requirements
 
@@ -658,7 +667,7 @@ compared against the packet's HMAC.
 Comparison of the computed HMAC and the packet's HMAC MUST be
 time-constant to avoid information leaks.
 
-At this point, the processing node can generate a _rho_-key and a _gamma_-key.
+At this point, the processing node can generate a _rho_-key.
 
 The routing information is then deobfuscated, and the information about the
 next hop is extracted.
@@ -845,7 +854,9 @@ The top byte of `failure_code` can be read as a set of flags:
 * 0x1000 (UPDATE): new channel update enclosed
 
 Please note that the `channel_update` field is mandatory in messages whose
-`failure_code` includes the `UPDATE` flag.
+`failure_code` includes the `UPDATE` flag. It is encoded *with* the message
+type prefix, i.e. it should always start with `0x0102`. Note that historical
+lightning implementations serialized this without the `0x0102` message type.
 
 The following `failure_code`s are defined:
 
@@ -949,9 +960,9 @@ handling by the processing node.
    * [`u32`:`height`]
 
 The `payment_hash` is unknown to the final node, the `payment_secret` doesn't
-match the `payment_hash`, the amount for that `payment_hash` is incorrect or
+match the `payment_hash`, the amount for that `payment_hash` is incorrect,
 the CLTV expiry of the htlc is too close to the current block height for safe
-handling.
+handling or `payment_metadata` isn't present while it should be.
 
 The `htlc_msat` parameter is superfluous, but left in for backwards
 compatibility. The value of `htlc_msat` always matches the amount specified in
@@ -990,11 +1001,13 @@ The amount in the HTLC doesn't match the value in the onion.
 
 1. type: UPDATE|20 (`channel_disabled`)
 2. data:
-   * [`u16`:`flags`]
+   * [`u16`:`disabled_flags`]
    * [`u16`:`len`]
    * [`len*byte`:`channel_update`]
 
 The channel from the processing node has been disabled.
+No flags for `disabled_flags` are currently defined, thus it is currently
+always two zero bytes.
 
 1. type: 21 (`expiry_too_far`)
 
@@ -1106,6 +1119,15 @@ An _intermediate hop_ MUST NOT, but the _final node_:
   - if the `amt_to_forward` does NOT correspond with the `incoming_htlc_amt` from the
   final node's HTLC:
     - MUST return a `final_incorrect_htlc_amount` error.
+  - if it returns a `channel_update`:
+    - MUST set `short_channel_id` to the `short_channel_id` used by the incoming onion.
+
+### Rationale
+
+In the case of multiple short_channel_id aliases, the `channel_update`
+`short_channel_id` should refer to the one the original sender is
+expecting, to both avoid confusion and to avoid leaking information
+about other aliases (or the real location of the channel UTXO).
 
 ## Receiving Failure Codes
 

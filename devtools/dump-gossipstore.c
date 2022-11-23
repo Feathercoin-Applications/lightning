@@ -10,6 +10,10 @@
 #include <unistd.h>
 #include <wire/peer_wire.h>
 
+/* Current versions we support */
+#define GSTORE_MAJOR 0
+#define GSTORE_MINOR 10
+
 int main(int argc, char *argv[])
 {
 	int fd;
@@ -17,10 +21,13 @@ int main(int argc, char *argv[])
 	struct gossip_hdr hdr;
 	size_t off;
 	bool print_deleted = false;
+	bool print_timestamp = false;
 
 	setup_locale();
 	opt_register_noarg("--print-deleted", opt_set_bool, &print_deleted,
 			   "Print deleted entries too");
+	opt_register_noarg("--print-timestamps", opt_set_bool, &print_timestamp,
+			   "Print timestamp with entries");
 	opt_register_noarg("--help|-h", opt_usage_and_exit,
 			   "[<gossip_store>]"
 			   "Dump all gossip messages in the store",
@@ -40,11 +47,19 @@ int main(int argc, char *argv[])
 	if (read(fd, &version, sizeof(version)) != sizeof(version))
 		errx(1, "Empty file");
 
-	if (version != GOSSIP_STORE_VERSION)
-		warnx("UNSUPPORTED GOSSIP VERSION %u (expected %u)",
-		      version, GOSSIP_STORE_VERSION);
+	if (GOSSIP_STORE_MAJOR_VERSION(version) != GSTORE_MAJOR)
+		errx(1, "Unsupported major gossip_version %u (expected %u)",
+		     GOSSIP_STORE_MAJOR_VERSION(version), GSTORE_MAJOR);
 
-	printf("GOSSIP VERSION %u\n", version);
+	/* Unsupported minor just means we might not understand all fields,
+	 * or all flags. */
+	if (GOSSIP_STORE_MINOR_VERSION(version) != GSTORE_MINOR)
+		warnx("UNKNOWN GOSSIP minor VERSION %u (expected %u)",
+		      GOSSIP_STORE_MINOR_VERSION(version), GSTORE_MINOR);
+
+	printf("GOSSIP VERSION %u/%u\n",
+	       GOSSIP_STORE_MINOR_VERSION(version),
+	       GOSSIP_STORE_MAJOR_VERSION(version));
 	off = 1;
 
 	while (read(fd, &hdr, sizeof(hdr)) == sizeof(hdr)) {
@@ -52,10 +67,12 @@ int main(int argc, char *argv[])
 		struct short_channel_id scid;
 		u32 msglen = be32_to_cpu(hdr.len);
 		u8 *msg, *inner;
-		bool deleted, push;
+		bool deleted, push, ratelimit;
+		u32 blockheight;
 
 		deleted = (msglen & GOSSIP_STORE_LEN_DELETED_BIT);
 		push = (msglen & GOSSIP_STORE_LEN_PUSH_BIT);
+		ratelimit = (msglen & GOSSIP_STORE_LEN_RATELIMIT_BIT);
 
 		msglen &= GOSSIP_STORE_LEN_MASK;
 		msg = tal_arr(NULL, u8, msglen);
@@ -66,9 +83,12 @@ int main(int argc, char *argv[])
 		    != crc32c(be32_to_cpu(hdr.timestamp), msg, msglen))
 			warnx("Checksum verification failed");
 
-		printf("%zu: %s%s", off,
+		printf("%zu: %s%s%s", off,
 		       deleted ? "DELETED " : "",
-		       push ? "PUSH " : "");
+		       push ? "PUSH " : "",
+		       ratelimit ? "RATE-LIMITED " : "");
+		if (print_timestamp)
+			printf("T=%u ", be32_to_cpu(hdr.timestamp));
 		if (deleted && !print_deleted) {
 			printf("\n");
 			goto end;
@@ -102,6 +122,11 @@ int main(int argc, char *argv[])
 			printf("delete channel: %s\n",
 			       type_to_string(tmpctx, struct short_channel_id,
 					      &scid));
+		} else if (fromwire_gossip_store_chan_dying(msg, &scid, &blockheight)) {
+			printf("dying channel: %s (deadline %u)\n",
+			       type_to_string(tmpctx, struct short_channel_id,
+					      &scid),
+			       blockheight);
 		} else {
 			warnx("Unknown message %u",
 			      fromwire_peektype(msg));

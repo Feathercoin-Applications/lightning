@@ -36,7 +36,7 @@ lightning-cli helpme
 ### How to get the balance of each channel ?
 
 You can use the `listfunds` command and take a ratio of `our_amount_msat` over
-`amount_msat`. Note that this doesn't account for the [channel reserve](https://github.com/lightningnetwork/lightning-rfc/blob/master/02-peer-protocol.md#rationale).
+`amount_msat`. Note that this doesn't account for the [channel reserve](https://github.com/lightning/bolts/blob/master/02-peer-protocol.md#rationale).
 
 A better option is to use the [`summary` plugin](https://github.com/lightningd/plugins/tree/master/summary)
 which nicely displays channel balances, along with other useful channel information.
@@ -48,7 +48,7 @@ See the [listpeers command manpage](https://lightning.readthedocs.io/lightning-l
 ### My payment is failing / all my payments are failing, why ?
 
 There are many reasons for a payment failure. The most common one is a
-[failure](https://github.com/lightningnetwork/lightning-rfc/blob/master/04-onion-routing.md#failure-messages)
+[failure](https://github.com/lightning/bolts/blob/master/04-onion-routing.md#failure-messages)
 along the route from you to the payee.
 The best (and most common) solution to a route failure problem is to open more channels,
 which should increase the available routes to the recipient and lower the probability of a failure.
@@ -71,9 +71,10 @@ Note that if you already have a channel open to them, you'll need to close it be
 
 There is no risk to your channels if your IP address changes.
 Other nodes might not be able to connect to you, but your node can still connect to them.
-But c-lightning also has an integrated IPv4/6 address discovery mechanism.
+But Core Lightning also has an integrated IPv4/6 address discovery mechanism.
 If your node detects an new public address, it will update its announcement.
-For this to work binhind a NAT router you need to forward the TCP port 9735 to your node.
+For this to work binhind a NAT router you need to forward the default TCP port 9735 to your node.
+IP discovery is only active if no other addresses are announced.
 
 Alternatively, you can [setup a TOR hidden service](TOR.md) for your node that
 will also work well behind NAT firewalls.
@@ -91,7 +92,7 @@ If you use a single `bitcoind` for multiple `lightningd`'s, be sure to raise the
 max RPC thread limit (`-rpcthreads`), each `lightningd` can use up to 4 threads, which is
 the default `bitcoind` max.
 
-### Can I use C-lightning on mobile ?
+### Can I use Core Lightning on mobile ?
 
 #### Remote control
 
@@ -113,8 +114,8 @@ In summary: as a Bitcoin user, one may be familiar with a file or a seed
 (or some mnemonics) from which
 it can recover all its funds.
 
-C-lightning has an internal bitcoin wallet, which you can use to make "on-chain"
-transactions, (see [withdraw](https://lightning.readthedocs.io/lightning-withdraw.7.html).
+Core Lightning has an internal bitcoin wallet, which you can use to make "on-chain"
+transactions, (see [withdraw](https://lightning.readthedocs.io/lightning-withdraw.7.html)).
 These on-chain funds are backed up via the HD wallet seed, stored in byte-form in `hsm_secret`.
 
 `lightningd` also stores information for funds locked in Lightning Network channels, which are stored
@@ -123,7 +124,7 @@ There is no single-seed backup for funds locked in channels.
 
 While crucial for node operation, snapshot-style backups of the `lightningd` database is **discouraged**,
 as _any_ loss of state may result in permanent loss of funds.
-See the [penalty mechanism](https://github.com/lightningnetwork/lightning-rfc/blob/master/05-onchain.md#revoked-transaction-close-handling)
+See the [penalty mechanism](https://github.com/lightning/bolts/blob/master/05-onchain.md#revoked-transaction-close-handling)
 for more information on why any amount of state-loss results in fund loss.
 
 Real-time database replication is the recommended approach to backing up node data.
@@ -131,13 +132,115 @@ Tools for replication are currently in active development, using the `db_write`
 [plugin hook](https://lightning.readthedocs.io/PLUGINS.html#db-write).
 
 
-## Loss
+## Channel Management
 
-### Rescanning the block chain for lost utxos
+### How to forget about a channel? <a name="forget-channel"></a>
+
+Channels may end up stuck during funding and never confirm
+on-chain. There is a variety of causes, the most common ones being
+that the funds have been double-spent, or the funding fee was too low
+to be confirmed. This is unlikely to happen in normal operation, as
+CLN tries to use sane defaults and prevents double-spends whenever
+possible, but using custom feerates or when the bitcoin backend has no
+good fee estimates it is still possible.
+
+Before forgetting about a channel it is important to ensure that the
+funding transaction will never be confirmable by double-spending the
+funds. To do so you have to rescan the UTXOs using
+[`dev-rescan-outputs`](#rescanning) to reset any funds that may have
+been used in the funding transaction, then move all the funds to a new
+address:
+
+```bash
+lightning-cli dev-rescan-outputs
+ADDR=$(lightning-cli newaddr bech32 | jq .bech32)
+lightning-cli withdraw $ADDR all
+```
+
+This step is not required if the funding transaction was already
+double-spent, however it is safe to do it anyway, just in case.
+
+Then wait for the transaction moving the funds to confirm. This
+ensures any pending funding transaction can no longer be
+confirmed. 
+
+As an additional step you can also force-close the unconfirmed channel:
+
+```bash
+lightning-cli close $PEERID 10  # Force close after 10 seconds
+```
+
+This will store a unilateral close TX in the DB as last resort means
+of recovery should the channel unexpectedly confirm anyway.
+
+Now you can use the `dev-forget-channel` command to remove
+the DB entries from the database.
+
+```bash
+lightning-cli dev-forget-channel $NODEID
+```
+
+This will perform additional checks on whether it is safe to forget
+the channel, and only then removes the channel from the DB. Notice
+that this command is only available if CLN was compiled with
+`DEVELOPER=1`.
+
+### My channel is stuck in state `CHANNELD_AWAITING_LOCKIN`
+
+There are two root causes to this issue:
+ - Funding transaction isn't confirmed yet. In this case we have to
+   wait longer, or, in the case of a transaction that'll never
+   confirm, forget the channel safely.
+ - The peer hasn't sent a lockin message. This message ackowledges
+   that the node has seen sufficiently many confirmations to consider
+   the channel funded.
+
+In the case of a confirmed funding transaction but a missing lockin
+message, a simple reconnection may be sufficient to nudge it to
+acknowledge the confirmation:
+
+```bash
+lightning-cli disconnect $PEERID true  # force a disconnect
+lightning-cli connect $PEERID
+```
+
+The lack of funding locked messages is a bug we are trying to debug
+here at issue [#5366][5366], if you have encountered this issue please
+drop us a comment and any information that may be helpful.
+
+If this didn't work it could be that the peer is simply not caught up
+with the blockchain and hasn't seen the funding confirm yet. In this
+case we can either wait or force a unilateral close:
+
+```bash
+lightning-cli close $PEERID 10  # Force a unilateral after 10 seconds
+```
+
+If the funding transaction is not confirmed we may either wait or
+attempt to double-spend it. Confirmations may take a long time,
+especially when the fees used for the funding transaction were
+low. You can check if the transaction is still going to confirm by
+looking the funding transaction on a block explorer:
+
+```bash
+TXID=$(lightning-cli listpeers $PEERID | jq -r ''.peers[].channels[].funding_txid')
+```
+
+This will give you the funding transaction ID that can be looked up in
+any explorer.
+
+If you don't want to wait for the channel to confirm, you could forget
+the channel (see [How to forget about a channel?](#forget-channel) for
+details), however be careful as that may be dangerous and you'll need
+to rescan and double-spend the outputs so the funding cannot confirm.
+
+## Loss of funds
+
+### Rescanning the block chain for lost utxos <a name="rescanning"></a>
 
 There are 3 types of 'rescans' you can make:
 - `rescanblockchain`: A `bitcoind` RPC call which rescans the blockchain
-   starting at the given height. This does not have an effect on c-lightning
+   starting at the given height. This does not have an effect on Core Lightning
    as `lightningd` tracks all block and wallet data independently.
 - `--rescan=depth`: A `lightningd` configuration flag. This flag is read at node startup
    and tells lightningd at what depth from current blockheight to rebuild its internal state.
@@ -177,8 +280,9 @@ successful, result will be a private key matching a unilaterally
 closed channel, that you can import into any wallet, recovering the
 funds into that wallet.
 
-[spec-features]: https://github.com/lightningnetwork/lightning-rfc/blob/master/09-features.md
+[spec-features]: https://github.com/lightning/bolts/blob/master/09-features.md
 [mandelbit-recovery]: https://github.com/mandelbit/bitcoin-tutorials/blob/master/CLightningRecoverFunds.md
+[5366]: https://github.com/ElementsProject/lightning/issues/5366
 
 ## Technical Questions
 

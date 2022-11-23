@@ -1,13 +1,13 @@
 # Plugins
 
 Plugins are a simple yet powerful way to extend the functionality
-provided by c-lightning. They are subprocesses that are started by the
+provided by Core Lightning. They are subprocesses that are started by the
 main `lightningd` daemon and can interact with `lightningd` in a
 variety of ways:
 
  - **Command line option passthrough** allows plugins to register their
    own command line options that are exposed through `lightningd` so
-   that only the main process needs to be configured.
+   that only the main process needs to be configured[^options].
  - **JSON-RPC command passthrough** adds a way for plugins to add their
    own commands to the JSON-RPC interface.
  - **Event stream subscriptions** provide plugins with a push-based
@@ -22,6 +22,27 @@ used as protocol on top of the two streams, with the plugin acting as
 server and `lightningd` acting as client. The plugin file needs to be
 executable (e.g. use `chmod a+x plugin_name`)
 
+A `helloworld.py` example plugin based on [pyln-client][pyln-client]
+can be found [here](../contrib/plugins/helloworld.py). There is also a
+[repository](https://github.com/lightningd/plugins) with a collection of
+actively maintained plugins and finally, `lightningd`'s own internal
+[tests](../tests) can be a useful (and most reliable) resource.
+
+[^options]:  Only for plugins that start when `lightningd` starts, option
+    values are not remembered when a plugin is stopped or killed.
+
+### Warning
+
+As noted, `lightningd` uses `stdin` as an intake mechanism.  This can
+cause unexpected behavior if one is not careful.  To wit, care should
+be taken to ensure that debug/logging statements must be routed to
+`stderr` or directly to a file.  Activities that are benign in other
+contexts (`println!`, `dbg!`, etc) will cause the plugin to be killed
+with an error along the lines of:
+
+`UNUSUAL plugin-cln-plugin-startup: Killing plugin: JSON-RPC message
+does not contain "jsonrpc" field`
+
 ## A day in the life of a plugin
 
 During startup of `lightningd` you can use the `--plugin=` option to
@@ -29,13 +50,14 @@ register one or more plugins that should be started. In case you wish
 to start several plugins you have to use the `--plugin=` argument
 once for each plugin (or `--plugin-dir` or place them in the default
 plugin dirs, usually `/usr/local/libexec/c-lightning/plugins` and
-`~/.lightningd/plugins`). An example call might look like:
+`~/.lightning/plugins`). An example call might look like:
 
 ```
 lightningd --plugin=/path/to/plugin1 --plugin=path/to/plugin2
 ```
 
-`lightningd` will run your plugins from the `--lightning-dir`/networkname, then
+`lightningd` will run your plugins from the `--lightning-dir`/networkname
+as working directory and env variables "LIGHTNINGD_PLUGIN" and "LIGHTNINGD_VERSION" set, then
 will write JSON-RPC requests to the plugin's `stdin` and
 will read replies from its `stdout`. To initialize the plugin two RPC
 methods are required:
@@ -54,6 +76,13 @@ Once those two methods were called `lightningd` will start passing
 through incoming JSON-RPC commands that were registered and the plugin
 may interact with `lightningd` using the JSON-RPC over Unix-Socket
 interface.
+
+Above is generally valid for plugins that start when `lightningd` starts.
+For dynamic plugins that start via the [plugin][lightning-plugin] JSON-RPC command there
+is some difference, mainly in options passthrough (see note in [Types of Options](#types-of-options)).
+
+ - `shutdown` (optional): if subscribed to "shutdown" notification, a plugin can
+   exit cleanly when `lightningd` is shutting down or when stopped via `plugin stop`.
 
 ### The `getmanifest` method
 
@@ -107,12 +136,13 @@ example:
 	  "method": "mycustomnotification"
 	}
   ],
+  "nonnumericids": true,
   "dynamic": true
 }
 ```
 
-The `options` will be added to the list of command line options that
-`lightningd` accepts. The above will add a `--greeting` option with a
+During startup the `options` will be added to the list of command line options that
+`lightningd` accepts. If any `options` "name" is already taken startup will abort. The above will add a `--greeting` option with a
 default value of `World` and the specified description. *Notice that
 currently string, integers, bool, and flag options are supported.*
 
@@ -129,9 +159,16 @@ you plan on removing them: this will disable them if the user sets
 `allow-deprecated-apis` to false (which every developer should do,
 right?).
 
+The `nonnumericids` indicates that the plugin can handle
+string JSON request `id` fields: prior to v22.11 lightningd used numbers 
+for these, and the change to strings broke some plugins.  If not set,
+then strings will be used once this feature is removed after v23.05.
+See [the lightning-rpc documentation][lightning-rpc.7.md] for how to handle
+JSON `id` fields!
+
 The `dynamic` indicates if the plugin can be managed after `lightningd`
-has been started. Critical plugins that should not be stopped should set it
-to false.
+has been started using the [plugin][lightning-plugin] JSON-RPC command. Critical plugins that should not be stopped should set it
+to false. Plugin `options` can be passed to dynamic plugins as argument to the `plugin` command .
 
 If a `disable` member exists, the plugin will be disabled and the contents
 of this member is the reason why.  This allows plugins to disable themselves
@@ -163,7 +200,7 @@ Plugins are free to register any `name` for their `rpcmethod` as long
 as the name was not previously registered. This includes both built-in
 methods, such as `help` and `getinfo`, as well as methods registered
 by other plugins. If there is a conflict then `lightningd` will report
-an error and exit.
+an error and kill the plugin, this aborts startup if the plugin is *important*.
 
 #### Types of Options
 
@@ -217,6 +254,12 @@ Here's an example option set, as sent in response to `getmanifest`
     }
   ],
 ```
+
+**Note**: `lightningd` command line options are only parsed during startup and their
+values are not remembered when the plugin is stopped or killed.
+For dynamic plugins started with `plugin start`, options can be
+passed as extra arguments to that [command][lightning-plugin].
+
 
 #### Custom notifications
 
@@ -316,6 +359,12 @@ of this member is the reason why.
 The `startup` field allows a plugin to detect if it was started at
 `lightningd` startup (true), or at runtime (false).
 
+### Timeouts
+During startup ("startup" is true), the plugin has 60 seconds to
+return `getmanifest` and another 60 seconds to return `init`, or gets killed.
+When started dynamically via the [plugin][lightning-plugin] JSON-RPC command, both `getmanifest`
+and `init` should be completed within 60 seconds.
+
 ## JSON-RPC passthrough
 
 Plugins may register their own JSON-RPC methods that are exposed
@@ -398,9 +447,9 @@ if the funding transaction has been included into a block.
 {
   "channel_opened": {
     "id": "03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f",
-    "funding_satoshis": "100000000msat",
+    "funding_msat": 100000000,
     "funding_txid": "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b",
-    "funding_locked": false
+    "channel_ready": false
   }
 }
 ```
@@ -494,7 +543,7 @@ A notification for topic `invoice_payment` is sent every time an invoice is paid
   "invoice_payment": {
     "label": "unique-label-for-invoice",
     "preimage": "0000000000000000000000000000000000000000000000000000000000000000",
-    "msat": "10000msat"
+    "amount_msat": 10000
   }
 }
 
@@ -508,7 +557,7 @@ A notification for topic `invoice_creation` is sent every time an invoice is cre
   "invoice_creation": {
     "label": "unique-label-for-invoice",
     "preimage": "0000000000000000000000000000000000000000000000000000000000000000",
-    "msat": "10000msat"
+    "amount_msat": 10000
   }
 }
 ```
@@ -553,12 +602,9 @@ of a forward payment is set. The json format is same as the API
     "payment_hash": "f5a6a059a25d1e329d9b094aeeec8c2191ca037d3f5b0662e21ae850debe8ea2",
     "in_channel": "103x2x1",
     "out_channel": "103x1x1",
-    "in_msatoshi": 100001001,
-    "in_msat": "100001001msat",
-    "out_msatoshi": 100000000,
-    "out_msat": "100000000msat",
-    "fee": 1001,
-    "fee_msat": "1001msat",
+    "in_msat": 100001001,
+    "out_msat": 100000000,
+    "fee_msat": 1001,
     "status": "settled",
     "received_time": 1560696342.368,
     "resolved_time": 1560696342.556
@@ -573,12 +619,9 @@ or
     "payment_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
     "in_channel": "103x2x1",
     "out_channel": "110x1x0",
-    "in_msatoshi": 100001001,
-    "in_msat": "100001001msat",
-    "out_msatoshi": 100000000,
-    "out_msat": "100000000msat",
-    "fee": 1001,
-    "fee_msat": "1001msat",
+    "in_msat": 100001001,
+    "out_msat": 100000000,
+    "fee_msat": 1001,
     "status": "local_failed",
     "failcode": 16392,
     "failreason": "WIRE_PERMANENT_CHANNEL_FAILURE",
@@ -636,10 +679,8 @@ the commands `sendpay`/`waitsendpay` when these commands succeed.
     "id": 1,
     "payment_hash": "5c85bf402b87d4860f4a728e2e58a2418bda92cd7aea0ce494f11670cfbfb206",
     "destination": "035d2b1192dfba134e10e540875d366ebc8bc353d5aa766b80c090b39c3a5d885d",
-    "msatoshi": 100000000,
-    "amount_msat": "100000000msat",
-    "msatoshi_sent": 100001001,
-    "amount_sent_msat": "100001001msat",
+    "amount_msat": 100000000,
+    "amount_sent_msat": 100001001,
     "created_at": 1561390572,
     "status": "complete",
     "payment_preimage": "9540d98095fd7f37687ebb7759e733934234d4f934e34433d4998a37de3733ee"
@@ -666,10 +707,8 @@ the commands `sendpay`/`waitsendpay` when these commands fail.
       "id": 2,
       "payment_hash": "9036e3bdbd2515f1e653cb9f22f8e4c49b73aa2c36e937c926f43e33b8db8851",
       "destination": "035d2b1192dfba134e10e540875d366ebc8bc353d5aa766b80c090b39c3a5d885d",
-      "msatoshi": 100000000,
-      "amount_msat": "100000000msat",
-      "msatoshi_sent": 100001001,
-      "amount_sent_msat": "100001001msat",
+      "amount_msat": 100000000,
+      "amount_sent_msat": 100001001,
       "created_at": 1561395134,
       "status": "failed",
       "erring_index": 1,
@@ -707,11 +746,11 @@ i.e. only definitively resolved HTLCs or confirmed bitcoin transactions.
 		"vout":1, // (`chain_mvt` only)
 		"payment_hash": "xxx", // (either type, optional on both)
 		"part_id": 0, // (`channel_mvt` only, optional)
-		"credit":"2000000000msat",
-		"debit":"0msat",
-		"output_value": "2000000000msat", // ('chain_mvt' only)
+		"credit_msat":2000000000,
+		"debit_msat":0,
+		"output_msat": 2000000000, // ('chain_mvt' only)
 		"output_count": 2, // ('chain_mvt' only, typically only channel closes)
-		"fees": "382msat", // ('channel_mvt' only)
+		"fees_msat": 382, // ('channel_mvt' only)
 		"tags": ["deposit"],
 		"blockheight":102, // 'chain_mvt' only
 		"timestamp":1585948198,
@@ -842,6 +881,20 @@ current accounts (`account_id` matches the `account_id` emitted from
 }
 ```
 
+### `block_added`
+
+Emitted after each block is received from bitcoind, either during the initial sync or
+throughout the node's life as new blocks appear.
+
+```json
+{
+    "block": {
+      "hash": "000000000000000000034bdb3c01652a0aa8f63d32f949313d55af2509f9d245",
+      "height": 753304
+    }
+}
+```
+
 ### `openchannel_peer_sigs`
 
 When opening a channel with a peer using the collaborative transaction protocol
@@ -873,7 +926,7 @@ rely on the shutdown notification always been send.
 ## Hooks
 
 Hooks allow a plugin to define custom behavior for `lightningd`
-without having to modify the c-lightning source code itself. A plugin
+without having to modify the Core Lightning source code itself. A plugin
 declares that it'd like to be consulted on what to do next for certain
 events in the daemon. A hook can then decide how `lightningd` should
 react to the given event.
@@ -1100,7 +1153,7 @@ This hook is called whenever a valid payment for an unpaid invoice has arrived.
   "payment": {
     "label": "unique-label-for-invoice",
     "preimage": "0000000000000000000000000000000000000000000000000000000000000000",
-    "msat": "10000msat"
+    "amount_msat": 10000
   }
 }
 ```
@@ -1122,12 +1175,12 @@ the v1 protocol, and it has passed basic sanity checks:
 {
   "openchannel": {
     "id": "03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f",
-    "funding_satoshis": "100000000msat",
-    "push_msat": "0msat",
-    "dust_limit_satoshis": "546000msat",
-    "max_htlc_value_in_flight_msat": "18446744073709551615msat",
-    "channel_reserve_satoshis": "1000000msat",
-    "htlc_minimum_msat": "0msat",
+    "funding_msat": 100000000,
+    "push_msat": 0,
+    "dust_limit_msat": 546000,
+    "max_htlc_value_in_flight_msat": 18446744073709551615,
+    "channel_reserve_msat": 1000000,
+    "htlc_minimum_msat": 0,
     "feerate_per_kw": 7500,
     "to_self_delay": 5,
     "max_accepted_htlcs": 483,
@@ -1153,13 +1206,29 @@ e.g.
 {
     "result": "continue",
     "close_to": "bc1qlq8srqnz64wgklmqvurv7qnr4rvtq2u96hhfg2"
+	"mindepth": 0,
+	"reserve": "1234sat"
 }
 ```
 
 Note that `close_to` must be a valid address for the current chain,
 an invalid address will cause the node to exit with an error.
 
-Note that `openchannel` is a chained hook. Therefore `close_to` will only be
+ - `mindepth` is the number of confirmations to require before making
+   the channel usable. Notice that setting this to 0 (`zeroconf`) or
+   some other low value might expose you to double-spending issues, so
+   only lower this value from the default if you trust the peer not to
+   double-spend, or you reject incoming payments, including forwards,
+   until the funding is confirmed.
+
+ - `reserve` is an absolute value for the amount in the channel that
+   the peer must keep on their side. This ensures that they always
+   have something to lose, so only lower this below the 1% of funding
+   amount if you trust the peer. The protocol requires this to be
+   larger than the dust limit, hence it will be adjusted to be the
+   dust limit if the specified value is below.
+
+Note that `openchannel` is a chained hook. Therefore `close_to`, `reserve` will only be
 evaluated for the first plugin that sets it. If more than one plugin tries to
 set a `close_to` address an error will be logged.
 
@@ -1173,10 +1242,10 @@ the v2 protocol, and it has passed basic sanity checks:
   "openchannel2": {
     "id": "03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f",
     "channel_id": "252d1b0a1e57895e84137f28cf19ab2c35847e284c112fefdecc7afeaa5c1de7",
-    "their_funding": "100000000msat",
-    "dust_limit_satoshis": "546000msat",
-    "max_htlc_value_in_flight_msat": "18446744073709551615msat",
-    "htlc_minimum_msat": "0msat",
+    "their_funding_msat": 100000000,
+    "dust_limit_msat": 546000,
+    "max_htlc_value_in_flight_msat": 18446744073709551615,
+    "htlc_minimum_msat": 0,
     "funding_feerate_per_kw": 7500,
     "commitment_feerate_per_kw": 7500,
     "feerate_our_max": 10000,
@@ -1185,8 +1254,8 @@ the v2 protocol, and it has passed basic sanity checks:
     "max_accepted_htlcs": 483,
     "channel_flags": 1
     "locktime": 2453,
-    "channel_max_msat": "16777215000msat",
-    "requested_lease_msat": "100000000msat",
+    "channel_max_msat": 16777215000,
+    "requested_lease_msat": 100000000,
     "lease_blockheight_start": 683990,
     "node_blockheight": 683990
   }
@@ -1224,7 +1293,7 @@ e.g.
     "result": "continue",
     "close_to": "bc1qlq8srqnz64wgklmqvurv7qnr4rvtq2u96hhfg2"
     "psbt": "cHNidP8BADMCAAAAAQ+yBipSVZrrw28Oed52hTw3N7t0HbIyZhFdcZRH3+61AQAAAAD9////AGYAAAAAAQDfAgAAAAABARtaSZufCbC+P+/G23XVaQ8mDwZQFW1vlCsCYhLbmVrpAAAAAAD+////AvJs5ykBAAAAFgAUT6ORgb3CgFsbwSOzNLzF7jQS5s+AhB4AAAAAABepFNi369DMyAJmqX2agouvGHcDKsZkhwJHMEQCIHELIyqrqlwRjyzquEPvqiorzL2hrvdu9EBxsqppeIKiAiBykC6De/PDElnqWw49y2vTqauSJIVBgGtSc+vq5BQd+gEhAg0f8WITWvA8o4grxNKfgdrNDncqreMLeRFiteUlne+GZQAAAAEBIICEHgAAAAAAF6kU2Lfr0MzIAmapfZqCi68YdwMqxmSHAQQWABQB+tkKvNZml+JZIWRyLeSpXr7hZQz8CWxpZ2h0bmluZwEIexhVcpJl8ugM/AlsaWdodG5pbmcCAgABAA==",
-    "our_funding_msat": "39999000msat"
+    "our_funding_msat": 39999000
 }
 ```
 
@@ -1311,12 +1380,15 @@ requests an RBF for a channel funding transaction.
   "rbf_channel": {
     "id": "03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f",
     "channel_id": "252d1b0a1e57895e84137f28cf19ab2c35847e284c112fefdecc7afeaa5c1de7",
-    "their_funding": "100000000msat",
+    "their_last_funding_msat": 100000000,
+    "their_funding_msat": 100000000,
+    "our_last_funding_msat": 100000000,
     "funding_feerate_per_kw": 7500,
     "feerate_our_max": 10000,
     "feerate_our_min": 253,
-    "channel_max_msat": "16777215000msat",
-    "locktime": 2453
+    "channel_max_msat": 16777215000,
+    "locktime": 2453,
+    "requested_lease_msat": 100000000,
   }
 }
 ```
@@ -1341,7 +1413,7 @@ to calculate.
 {
     "result": "continue",
     "psbt": "cHNidP8BADMCAAAAAQ+yBipSVZrrw28Oed52hTw3N7t0HbIyZhFdcZRH3+61AQAAAAD9////AGYAAAAAAQDfAgAAAAABARtaSZufCbC+P+/G23XVaQ8mDwZQFW1vlCsCYhLbmVrpAAAAAAD+////AvJs5ykBAAAAFgAUT6ORgb3CgFsbwSOzNLzF7jQS5s+AhB4AAAAAABepFNi369DMyAJmqX2agouvGHcDKsZkhwJHMEQCIHELIyqrqlwRjyzquEPvqiorzL2hrvdu9EBxsqppeIKiAiBykC6De/PDElnqWw49y2vTqauSJIVBgGtSc+vq5BQd+gEhAg0f8WITWvA8o4grxNKfgdrNDncqreMLeRFiteUlne+GZQAAAAEBIICEHgAAAAAAF6kU2Lfr0MzIAmapfZqCi68YdwMqxmSHAQQWABQB+tkKvNZml+JZIWRyLeSpXr7hZQz8CWxpZ2h0bmluZwEIexhVcpJl8ugM/AlsaWdodG5pbmcCAgABAA==",
-    "our_funding_msat": "39999000msat"
+    "our_funding_msat": 39999000
 }
 ```
 
@@ -1358,19 +1430,21 @@ The payload of the hook call has the following format:
 {
   "onion": {
     "payload": "",
-    "type": "legacy",
     "short_channel_id": "1x2x3",
-    "forward_amount": "42msat",
+    "forward_msat": 42,
     "outgoing_cltv_value": 500014,
     "shared_secret": "0000000000000000000000000000000000000000000000000000000000000000",
     "next_onion": "[1365bytes of serialized onion]"
   },
   "htlc": {
-    "amount": "43msat",
+    "short_channel_id": "4x5x6",
+    "id": 27,
+    "amount_msat": 43,
     "cltv_expiry": 500028,
     "cltv_expiry_relative": 10,
     "payment_hash": "0000000000000000000000000000000000000000000000000000000000000000"
-  }
+  },
+  "forward_to": "0000000000000000000000000000000000000000000000000000000000000000"
 }
 ```
 
@@ -1379,7 +1453,6 @@ For detailed information about each field please refer to [BOLT 04 of the specif
  - `onion`:
    - `payload` contains the unparsed payload that was sent to us from the
    sender of the payment.
-   - `type` is `legacy` for realm 0 payments, `tlv` for realm > 1.
    - `short_channel_id` determines the channel that the sender is hinting
        should be used next.  Not present if we're the final destination.
    - `forward_amount` is the amount we should be forwarding to the next hop,
@@ -1395,6 +1468,8 @@ For detailed information about each field please refer to [BOLT 04 of the specif
    - `shared_secret` is the shared secret we used to decrypt the incoming
      onion. It is shared with the sender that constructed the onion.
  - `htlc`:
+   - `short_channel_id` is the channel this payment is coming from.
+   - `id` is the low-level sequential HTLC id integer as sent by the channel peer.
    - `amount` is the amount that we received with the HTLC. This amount minus
      the `forward_amount` is the fee that will stay with us.
    - `cltv_expiry` determines when the HTLC reverts back to the
@@ -1406,6 +1481,7 @@ For detailed information about each field please refer to [BOLT 04 of the specif
      blockheight.
    - `payment_hash` is the hash whose `payment_preimage` will unlock the funds
      and allow us to claim the HTLC.
+ - `forward_to`: if set, the channel_id we intend to forward this to (will not be present if the short_channel_id was invalid or we were the final destination).
 
 The hook response must have one of the following formats:
 
@@ -1426,6 +1502,7 @@ the response.  Note that this is always a TLV-style payload, so unlike
 hex digits long).  This will be re-parsed; it's useful for removing
 onion fields which a plugin doesn't want lightningd to consider.
 
+It can also specify `forward_to` in the response, replacing the destination.  This usually only makes sense if it wants to choose an alternate channel to the same next peer, but is useful if the `payload` is also replaced.
 
 ```json
 {
@@ -1484,7 +1561,7 @@ handled the remaining plugins will be skipped.
 ### `rpc_command`
 
 The `rpc_command` hook allows a plugin to take over any RPC command. It sends
-the received JSON-RPC request to the registered plugin,
+the received JSON-RPC request (for any method!) to the registered plugin,
 
 ```json
 {
@@ -1557,7 +1634,7 @@ The `custommsg` plugin hook is the receiving counterpart to the
 [`sendcustommsg`][sendcustommsg] RPC method and allows plugins to handle
 messages that are not handled internally. The goal of these two components is
 to allow the implementation of custom protocols or prototypes on top of a
-c-lightning node, without having to change the node's implementation itself.
+Core Lightning node, without having to change the node's implementation itself.
 
 The payload for a call follows this format:
 
@@ -1571,33 +1648,32 @@ The payload for a call follows this format:
 This payload would have been sent by the peer with the `node_id` matching
 `peer_id`, and the message has type `0x1337` and contents `ffffffff`. Notice
 that the messages are currently limited to odd-numbered types and must not
-match a type that is handled internally by c-lightning. These limitations are
+match a type that is handled internally by Core Lightning. These limitations are
 in place in order to avoid conflicts with the internal state tracking, and
 avoiding disconnections or channel closures, since odd-numbered message can be
 ignored by nodes (see ["it's ok to be odd" in the specification][oddok] for
 details). The plugin must implement the parsing of the message, including the
-type prefix, since c-lightning does not know how to parse the message.
+type prefix, since Core Lightning does not know how to parse the message.
 
 Because this is a chained hook, the daemon expects the result to be
 `{'result': 'continue'}`. It will fail if something else is returned.
 
-### `onion_message_blinded` and `onion_message_ourpath`
+### `onion_message_recv` and `onion_message_recv_secret`
 
 **(WARNING: experimental-offers only)**
 
 These two hooks are almost identical, in that they are called when
 an onion message is received.
 
-`onion_message_blinded` is used for unsolicited messages (where the
+`onion_message_recv` is used for unsolicited messages (where the
 source knows that it is sending to this node), and
-`onion_message_ourpath` is used for messages which use a blinded path
-we supplied (where the source doesn't know that this node is the
-destination).  The latter hook will have a `our_alias` field, the
+`onion_message_recv_secret` is used for messages which use a blinded path
+we supplied.  The latter hook will have a `pathsecret` field, the
 former never will.
 
 These hooks are separate, because replies MUST be ignored unless they
-use the correct path (i.e. `onion_message_ourpath`, with the expected
-`our_alias`).  This avoids the source trying to probe for responses
+use the correct path (i.e. `onion_message_recv_secret`, with the expected
+`pathsecret`).  This avoids the source trying to probe for responses
 without using the designated delivery path.
 
 The payload for a call follows this format:
@@ -1605,7 +1681,7 @@ The payload for a call follows this format:
 ```json
 {
     "onion_message": {
-        "our_alias": "02df5ffe895c778e10f7742a6c5b8a0cefbe9465df58b92fadeb883752c8107c8f",
+        "pathsecret": "0000000000000000000000000000000000000000000000000000000000000000",
         "reply_first_node": "02df5ffe895c778e10f7742a6c5b8a0cefbe9465df58b92fadeb883752c8107c8f",
         "reply_blinding": "02df5ffe895c778e10f7742a6c5b8a0cefbe9465df58b92fadeb883752c8107c8f",
 		"reply_path": [ {"id": "02df5ffe895c778e10f7742a6c5b8a0cefbe9465df58b92fadeb883752c8107c8f",
@@ -1622,12 +1698,11 @@ The payload for a call follows this format:
 All fields shown here are optional.
 
 We suggest just returning `{'result': 'continue'}`; any other result
-Signed-off-by: Rusty Russell <rusty@rustcorp.com.au>
 will cause the message not to be handed to any other hooks.
 
 ## Bitcoin backend
 
-C-lightning communicates with the Bitcoin network through a plugin. It uses the
+Core Lightning communicates with the Bitcoin network through a plugin. It uses the
 `bcli` plugin by default but you can use a custom one, multiple custom ones for
 different operations, or write your own for your favourite Bitcoin data source!
 
@@ -1704,11 +1779,14 @@ The plugin must broadcast it and respond with the following fields:
 
 [jsonrpc-spec]: https://www.jsonrpc.org/specification
 [jsonrpc-notification-spec]: https://www.jsonrpc.org/specification#notification
-[bolt4]: https://github.com/lightningnetwork/lightning-rfc/blob/master/04-onion-routing.md
-[bolt4-failure-messages]: https://github.com/lightningnetwork/lightning-rfc/blob/master/04-onion-routing.md#failure-messages
-[bolt4-failure-onion]: https://github.com/lightningnetwork/lightning-rfc/blob/master/04-onion-routing.md#returning-errors
-[bolt2-open-channel]: https://github.com/lightningnetwork/lightning-rfc/blob/master/02-peer-protocol.md#the-open_channel-message
+[bolt4]: https://github.com/lightning/bolts/blob/master/04-onion-routing.md
+[bolt4-failure-messages]: https://github.com/lightning/bolts/blob/master/04-onion-routing.md#failure-messages
+[bolt4-failure-onion]: https://github.com/lightning/bolts/blob/master/04-onion-routing.md#returning-errors
+[bolt2-open-channel]: https://github.com/lightning/bolts/blob/master/02-peer-protocol.md#the-open_channel-message
 [sendcustommsg]: lightning-sendcustommsg.7.html
-[oddok]: https://github.com/lightningnetwork/lightning-rfc/blob/master/00-introduction.md#its-ok-to-be-odd
-[spec]: [https://github.com/lightningnetwork/lightning-rfc]
-[bolt9]: https://github.com/lightningnetwork/lightning-rfc/blob/master/09-features.md
+[oddok]: https://github.com/lightning/bolts/blob/master/00-introduction.md#its-ok-to-be-odd
+[spec]: [https://github.com/lightning/bolts]
+[bolt9]: https://github.com/lightning/bolts/blob/master/09-features.md
+[lightning-plugin]: lightning-plugin.7.md
+[pyln-client]: ../contrib/pyln-client
+[lightning-rpc.7.md]: lightning-rpc.7.md

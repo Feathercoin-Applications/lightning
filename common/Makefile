@@ -10,6 +10,7 @@ COMMON_SRC_NOGEN :=				\
 	common/billboard.c			\
 	common/bip32.c				\
 	common/blindedpath.c			\
+	common/blindedpay.c			\
 	common/blinding.c			\
 	common/blockheight_states.c		\
 	common/bolt11.c				\
@@ -34,7 +35,6 @@ COMMON_SRC_NOGEN :=				\
 	common/features.c			\
 	common/fee_states.c			\
 	common/fp16.c				\
-	common/gossip_rcvd_filter.c		\
 	common/gossip_store.c			\
 	common/gossmap.c			\
 	common/hash_u5.c			\
@@ -44,22 +44,26 @@ COMMON_SRC_NOGEN :=				\
 	common/htlc_trim.c			\
 	common/htlc_tx.c			\
 	common/htlc_wire.c			\
+	common/interactivetx.c			\
 	common/initial_channel.c		\
 	common/initial_commit_tx.c		\
+	common/invoice_path_id.c		\
 	common/iso4217.c			\
-	common/json.c				\
-	common/json_helpers.c			\
+	common/json_filter.c			\
+	common/json_param.c			\
+	common/json_parse.c			\
+	common/json_parse_simple.c		\
 	common/json_stream.c			\
-	common/json_tok.c			\
 	common/key_derive.c			\
 	common/keyset.c				\
 	common/lease_rates.c			\
 	common/memleak.c			\
 	common/msg_queue.c			\
 	common/node_id.c			\
-	common/onion.c				\
+	common/onion_decode.c			\
+	common/onion_encode.c			\
 	common/onionreply.c			\
-	common/param.c				\
+	common/onion_message_parse.c		\
 	common/peer_billboard.c			\
 	common/peer_failed.c			\
 	common/peer_io.c			\
@@ -92,7 +96,7 @@ COMMON_SRC_NOGEN :=				\
 	common/wire_error.c
 
 
-COMMON_SRC_GEN := common/status_wiregen.c common/peer_status_wiregen.c
+COMMON_SRC_GEN := common/status_wiregen.c common/peer_status_wiregen.c common/scb_wiregen.c
 
 COMMON_HEADERS_NOGEN := $(COMMON_SRC_NOGEN:.c=.h)	\
 	common/closing_fee.h				\
@@ -100,18 +104,22 @@ COMMON_HEADERS_NOGEN := $(COMMON_SRC_NOGEN:.c=.h)	\
 	common/ecdh.h					\
 	common/errcode.h				\
 	common/gossip_constants.h			\
+	common/hsm_version.h				\
 	common/htlc.h					\
 	common/json_command.h				\
 	common/jsonrpc_errors.h				\
 	common/overflows.h				\
 	common/tx_roles.h
 
-COMMON_HEADERS_GEN := common/htlc_state_names_gen.h common/status_wiregen.h common/peer_status_wiregen.h
+COMMON_HEADERS_GEN := common/htlc_state_names_gen.h common/status_wiregen.h common/peer_status_wiregen.h common/scb_wiregen.h
 
 COMMON_HEADERS := $(COMMON_HEADERS_GEN) $(COMMON_HEADERS_NOGEN)
 COMMON_SRC := $(COMMON_SRC_NOGEN) $(COMMON_SRC_GEN)
 
 COMMON_OBJS := $(COMMON_SRC:.c=.o)
+
+common/scb_wiregen.h_args := -s
+common/scb_wiregen.c_args := -s
 
 # Check that all h and c files are in the Makefile!
 check-common-files:

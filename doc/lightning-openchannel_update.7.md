@@ -30,11 +30,12 @@ RETURN VALUE
 
 [comment]: # (GENERATE-FROM-SCHEMA-START)
 On success, an object is returned, containing:
-- **channel_id** (hex): the channel id of the channel (always 64 characters)
+
+- **channel\_id** (hex): the channel id of the channel (always 64 characters)
 - **psbt** (string): the PSBT of the funding transaction
-- **commitments_secured** (boolean): whether the *psbt* is complete (if true, sign *psbt* and call `openchannel_signed` to complete the channel open)
-- **funding_outnum** (u32): The index of the funding output in the psbt
-- **close_to** (hex, optional): scriptPubkey which we have to close to if we mutual close
+- **commitments\_secured** (boolean): whether the *psbt* is complete (if true, sign *psbt* and call `openchannel_signed` to complete the channel open)
+- **funding\_outnum** (u32): The index of the funding output in the psbt
+- **close\_to** (hex, optional): scriptPubkey which we have to close to if we mutual close
 
 [comment]: # (GENERATE-FROM-SCHEMA-END)
 
@@ -71,4 +72,4 @@ RESOURCES
 ---------
 
 Main web site: <https://github.com/ElementsProject/lightning>
-[comment]: # ( SHA256STAMP:22ff9536e97ea194d9d9ba10a4f3244a0818a1605502b7ed25241a3a97f041d1)
+[comment]: # ( SHA256STAMP:14632f65d4c44b34762d3fa7e0f5b823a519d3dc5fc7a2a69f677000efd937fb)

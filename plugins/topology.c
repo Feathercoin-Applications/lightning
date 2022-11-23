@@ -6,8 +6,8 @@
 #include <ccan/tal/str/str.h>
 #include <common/dijkstra.h>
 #include <common/gossmap.h>
+#include <common/json_param.h>
 #include <common/json_stream.h>
-#include <common/json_tok.h>
 #include <common/memleak.h>
 #include <common/pseudorand.h>
 #include <common/route.h>
@@ -94,21 +94,6 @@ static bool can_carry(const struct gossmap *map,
 	return true;
 }
 
-static void json_add_route_hop_style(struct json_stream *response,
-				     const char *fieldname,
-				     enum route_hop_style style)
-{
-	switch (style) {
-	case ROUTE_HOP_LEGACY:
-		json_add_string(response, fieldname, "legacy");
-		return;
-	case ROUTE_HOP_TLV:
-		json_add_string(response, fieldname, "tlv");
-		return;
-	}
-	abort();
-}
-
 /* Output a route hop */
 static void json_add_route_hop(struct json_stream *js,
 			       const char *fieldname,
@@ -121,7 +106,7 @@ static void json_add_route_hop(struct json_stream *js,
 	json_add_num(js, "direction", r->direction);
 	json_add_amount_msat_compat(js, r->amount, "msatoshi", "amount_msat");
 	json_add_num(js, "delay", r->delay);
-	json_add_route_hop_style(js, "style", r->style);
+	json_add_string(js, "style", "tlv");
 	json_object_end(js);
 }
 
@@ -145,7 +130,7 @@ static struct command_result *json_getroute(struct command *cmd,
 
 	if (!param(cmd, buffer, params,
 		   p_req("id", param_node_id, &destination),
-		   p_req("msatoshi", param_msat, &msat),
+		   p_req("amount_msat|msatoshi", param_msat, &msat),
 		   p_req("riskfactor", param_millionths, &riskfactor_millionths),
 		   p_opt_def("cltv", param_number, &cltv, 9),
 		   p_opt_def("fromid", param_node_id, &source, local_id),
@@ -295,21 +280,8 @@ static void json_add_halfchan(struct json_stream *response,
 		json_add_num(response, "delay", c->half[dir].delay);
 		json_add_amount_msat_only(response, "htlc_minimum_msat",
 					  htlc_minimum_msat);
-
-		/* We used to always print this, but that's weird */
-		if (deprecated_apis && !(message_flags & 1)) {
-			if (!amount_sat_to_msat(&htlc_maximum_msat, capacity))
-				plugin_err(plugin,
-					   "Channel with impossible capacity %s",
-					   type_to_string(tmpctx,
-							  struct amount_sat,
-							  &capacity));
-			message_flags = 1;
-		}
-
-		if (message_flags & 1)
-			json_add_amount_msat_only(response, "htlc_maximum_msat",
-						  htlc_maximum_msat);
+		json_add_amount_msat_only(response, "htlc_maximum_msat",
+					  htlc_maximum_msat);
 		json_add_hex_talarr(response, "features", chanfeatures);
 		json_object_end(response);
 	}
@@ -475,7 +447,6 @@ static void json_add_node(struct json_stream *js,
 		struct json_escape *esc;
 		struct tlv_node_ann_tlvs *na_tlvs;
 
-		na_tlvs = tlv_node_ann_tlvs_new(tmpctx);
 		if (!fromwire_node_announcement(nannounce, nannounce,
 						&signature,
 						&features,
@@ -484,7 +455,7 @@ static void json_add_node(struct json_stream *js,
 						rgb_color,
 						alias,
 						&addresses,
-						na_tlvs)) {
+						&na_tlvs)) {
 			plugin_log(plugin, LOG_BROKEN,
 				   "Cannot parse stored node_announcement"
 				   " for %s at %u: %s",
@@ -573,9 +544,9 @@ static struct amount_msat peer_capacity(const struct gossmap *gossmap,
 			continue;
 		if (!c->half[!dir].enabled)
 			continue;
-		if (!amount_msat_add(&capacity, capacity,
-				    amount_msat(fp16_to_u64(c->half[dir]
-							   .htlc_max))))
+		if (!amount_msat_add(
+			&capacity, capacity,
+			amount_msat(fp16_to_u64(c->half[!dir].htlc_max))))
 			continue;
 	}
 	return capacity;
@@ -606,6 +577,7 @@ static struct command_result *json_listincoming(struct command *cmd,
 		struct gossmap_chan *ourchan;
 		struct gossmap_node *peer;
 		struct short_channel_id scid;
+		const u8 *peer_features;
 
 		ourchan = gossmap_nth_chan(gossmap, me, i, &dir);
 		/* If its half is disabled, ignore. */
@@ -622,12 +594,22 @@ static struct command_result *json_listincoming(struct command *cmd,
 		json_add_amount_msat_only(js, "fee_base_msat",
 					  amount_msat(ourchan->half[!dir]
 						      .base_fee));
+		json_add_amount_msat_only(js, "htlc_min_msat",
+					  amount_msat(fp16_to_u64(ourchan->half[!dir]
+								  .htlc_min)));
+		json_add_amount_msat_only(js, "htlc_max_msat",
+					  amount_msat(fp16_to_u64(ourchan->half[!dir]
+								  .htlc_max)));
 		json_add_u32(js, "fee_proportional_millionths",
 			     ourchan->half[!dir].proportional_fee);
 		json_add_u32(js, "cltv_expiry_delta", ourchan->half[!dir].delay);
 		json_add_amount_msat_only(js, "incoming_capacity_msat",
 					 peer_capacity(gossmap,
 						       me, peer, ourchan));
+		json_add_bool(js, "public", !ourchan->private);
+		peer_features = gossmap_node_get_features(tmpctx, gossmap, peer);
+		if (peer_features)
+			json_add_hex_talarr(js, "peer_features", peer_features);
 		json_object_end(js);
 	}
 done:
@@ -639,8 +621,7 @@ done:
 #if DEVELOPER
 static void memleak_mark(struct plugin *p, struct htable *memtable)
 {
-	memleak_remove_region(memtable, global_gossmap,
-			      tal_bytelen(global_gossmap));
+	memleak_scan_obj(memtable, global_gossmap);
 }
 #endif
 

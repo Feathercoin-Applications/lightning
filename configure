@@ -1,5 +1,5 @@
 #! /bin/sh
-# Simple configure script for c-lightning.
+# Simple configure script for Core Lightning.
 
 set -e
 
@@ -7,6 +7,18 @@ CONFIGURATOR=ccan/tools/configurator/configurator
 CONFIG_VAR_FILE=config.vars
 CONFIG_HEADER=ccan/config.h
 BASE_WARNFLAGS="-Wall -Wundef -Wmissing-prototypes -Wmissing-declarations -Wstrict-prototypes -Wold-style-definition -Werror"
+
+OS=$(uname -s)
+ARCH=$(uname -m)
+if [ "$OS-$ARCH" = "Darwin-arm64" ]; then
+CPATH=/opt/homebrew/include
+LIBRARY_PATH=/opt/homebrew/lib
+export PKG_CONFIG_PATH=/opt/homebrew/opt/sqlite/lib/pkgconfig
+else
+CPATH=/usr/local/lib
+LIBRARY_PATH=/usr/local/lib
+export PKG_CONFIG_PATH=/usr/local/opt/sqlite/lib/pkgconfig
+fi
 
 : ${PKG_CONFIG=pkg-config}
 
@@ -50,6 +62,9 @@ default_cwarnflags()
 	if [ -n "${1##*-O3*}" ] || [ "$3" != "1" ]; then
 	    F="$F -Wno-maybe-uninitialized"
 	fi
+	# Recent clang understands that, but at least our MacOS CI doesn't, so keep
+	# this gcc-only.
+	F="$F -Wshadow=local"
     fi
     echo "$F"
 }
@@ -90,7 +105,7 @@ check_command()
     shift 1
 
     echo -n "checking for $name... "
-    if "$@" >/dev/null 2>&1; then
+    if "$@" >/dev/null 2>&1 </dev/null; then
 	echo 'found'
 	return 0
     fi
@@ -111,7 +126,7 @@ default_valgrind_setting()
 
 default_rust_setting()
 {
-    if cargo --version > /dev/null 2>&1; then
+    if cargo --version > /dev/null 2>&1 && rustfmt --version >/dev/null 2>&1; then
 	echo 1
     else
 	echo 0
@@ -177,8 +192,9 @@ usage()
     usage_with_default "--enable/disable-ub-sanitizer" "$UBSAN" "enable" "disable"
     echo "    Compile with undefined behaviour sanitizer"
     usage_with_default "--enable/disable-fuzzing" "$FUZZING" "enable" "disable"
-    echo "    Compile with Rust support"
+    echo "    Compile with fuzzing"
     usage_with_default "--enable/disable-rust" "$RUST" "enable" "disable"
+    echo "    Compile with Rust support"
     exit 1
 }
 
@@ -209,6 +225,11 @@ for opt in "$@"; do
 	    # case DEVELOPER has changed.
 	    if [ x"$COPTFLAGS" = x"$DEFAULT_COPTFLAGS" ]; then
 		unset COPTFLAGS
+	    fi
+	    # If they didn't have -Wshadow=local, add it on --reconfigure
+	    # (we only added it later)
+	    if [ x"${CWARNFLAGS%*-Wshadow=local}" = x"$CWARNFLAGS" ]; then
+		unset CWARNFLAGS
 	    fi
 	    ;;
 	CC=*) CC="${opt#CC=}";;
@@ -288,7 +309,7 @@ fi
 # Clean up on exit.
 trap "rm -f $CONFIG_VAR_FILE.$$" 0
 
-$CONFIGURATOR --extra-tests --autotools-style --var-file=$CONFIG_VAR_FILE.$$ --header-file=$CONFIG_HEADER.$$ --configurator-cc="$CONFIGURATOR_CC" --wrapper="$CONFIGURATOR_WRAPPER" "$CC" ${CWARNFLAGS-$BASE_WARNFLAGS} $CDEBUGFLAGS $COPTFLAGS -I/usr/local/include -L/usr/local/lib $SQLITE3_CFLAGS $POSTGRES_INCLUDE <<EOF
+$CONFIGURATOR --extra-tests --autotools-style --var-file=$CONFIG_VAR_FILE.$$ --header-file=$CONFIG_HEADER.$$ --configurator-cc="$CONFIGURATOR_CC" --wrapper="$CONFIGURATOR_WRAPPER" "$CC" ${CWARNFLAGS-$BASE_WARNFLAGS} $CDEBUGFLAGS $COPTFLAGS -I$CPATH -L$LIBRARY_PATH $SQLITE3_CFLAGS $POSTGRES_INCLUDE <<EOF
 
 var=HAVE_GOOD_LIBSODIUM
 desc=libsodium with IETF chacha20 variants
@@ -404,6 +425,12 @@ else
     HAVE_PYTHON3_MAKO=0
 fi
 
+if check_command 'lowdown' lowdown; then
+    HAVE_LOWDOWN=1
+else
+    HAVE_LOWDOWN=0
+fi
+
 if echo | check_command sha256sum sha256sum; then
     SHA256SUM=sha256sum
 elif echo | check_command "shasum -a 256" shasum -a 256; then
@@ -442,6 +469,7 @@ add_var ASAN "$ASAN"
 add_var UBSAN "$UBSAN"
 add_var TEST_NETWORK "$TEST_NETWORK"
 add_var HAVE_PYTHON3_MAKO "$HAVE_PYTHON3_MAKO"
+add_var HAVE_LOWDOWN "$HAVE_LOWDOWN"
 add_var SHA256SUM "$SHA256SUM"
 add_var FUZZING "$FUZZING"
 add_var RUST "$RUST"

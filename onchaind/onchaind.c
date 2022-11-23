@@ -43,7 +43,7 @@ static u32 delayed_to_us_feerate;
 static u32 htlc_feerate;
 
 /* The feerate for transactions spending from revoked transactions. */
-static u32 penalty_feerate;
+static u32 penalty_feerate, max_penalty_feerate;
 
 /* Min and max feerates we ever used */
 static u32 min_possible_feerate, max_possible_feerate;
@@ -235,6 +235,16 @@ static void record_external_spend(const struct bitcoin_txid *txid,
 						   out->sat, tag)));
 }
 
+static void record_external_spend_tags(const struct bitcoin_txid *txid,
+				       struct tracked_output *out,
+				       u32 blockheight,
+				       enum mvt_tag *tags TAKES)
+{
+	send_coin_mvt(take(new_coin_external_spend_tags(NULL, &out->outpoint,
+							txid, blockheight,
+							out->sat, tags)));
+}
+
 static void record_external_output(const struct bitcoin_outpoint *out,
 				   struct amount_sat amount,
 				   u32 blockheight,
@@ -249,6 +259,15 @@ static void record_external_deposit(const struct tracked_output *out,
 				    enum mvt_tag tag)
 {
 	record_external_output(&out->outpoint, out->sat, blockheight, tag);
+}
+
+static void record_external_deposit_tags(const struct tracked_output *out,
+					 u32 blockheight,
+					 enum mvt_tag *tags TAKES)
+{
+	send_coin_mvt(take(new_coin_external_deposit_tags(NULL, &out->outpoint,
+							  blockheight, out->sat,
+							  tags)));
 }
 
 static void record_mutual_close(const struct tx_parts *tx,
@@ -335,10 +354,13 @@ static void record_ignored_wallet_deposit(struct tracked_output *out)
 
 static void record_anchor(struct tracked_output *out)
 {
-	send_coin_mvt(take(new_coin_wallet_deposit(NULL,
+	enum mvt_tag *tags = new_tag_arr(NULL, ANCHOR);
+	tal_arr_expand(&tags, IGNORED);
+	send_coin_mvt(take(new_coin_wallet_deposit_tagged(NULL,
 					&out->outpoint,
 					out->tx_blockheight,
-					out->sat, ANCHOR)));
+					out->sat,
+					tags)));
 }
 
 static void record_coin_movements(struct tracked_output *out,
@@ -355,32 +377,36 @@ static void record_coin_movements(struct tracked_output *out,
 	 * AND so we can accurately calculate our on-chain fee burden */
 	if (out->tx_type == OUR_HTLC_TIMEOUT_TX
 	    || out->tx_type == OUR_HTLC_SUCCESS_TX)
-		record_channel_deposit(out, blockheight, HTLC_TX);
+		record_channel_deposit(out, out->tx_blockheight, HTLC_TX);
 
 	if (out->resolved->tx_type == OUR_HTLC_TIMEOUT_TO_US)
-		record_channel_deposit(out, blockheight, HTLC_TIMEOUT);
+		record_channel_deposit(out, out->tx_blockheight, HTLC_TIMEOUT);
 
 	/* there is a case where we've fulfilled an htlc onchain,
 	 * in which case we log a deposit to the channel */
 	if (out->resolved->tx_type == THEIR_HTLC_FULFILL_TO_US
 	    || out->resolved->tx_type == OUR_HTLC_SUCCESS_TX)
-		record_to_us_htlc_fulfilled(out, blockheight);
+		record_to_us_htlc_fulfilled(out, out->tx_blockheight);
 
 	/* If it's our to-us and our close, we publish *another* tx
 	 * which spends the output when the timeout ends */
 	if (out->tx_type == OUR_UNILATERAL) {
 		if (out->output_type == DELAYED_OUTPUT_TO_US)
-			record_channel_deposit(out, blockheight, CHANNEL_TO_US);
+			record_channel_deposit(out, out->tx_blockheight,
+					       CHANNEL_TO_US);
 		else if (out->output_type == OUR_HTLC) {
-			record_channel_deposit(out, blockheight, HTLC_TIMEOUT);
-			record_channel_withdrawal(txid, out, blockheight, HTLC_TIMEOUT);
+			record_channel_deposit(out, out->tx_blockheight,
+					       HTLC_TIMEOUT);
+			record_channel_withdrawal(txid, out, blockheight,
+						  HTLC_TIMEOUT);
 		} else if (out->output_type == THEIR_HTLC)
-			record_channel_withdrawal(txid, out, blockheight, HTLC_FULFILL);
+			record_channel_withdrawal(txid, out, blockheight,
+						  HTLC_FULFILL);
 	}
 
 	if (out->tx_type == THEIR_REVOKED_UNILATERAL
 	    || out->resolved->tx_type == OUR_PENALTY_TX)
-		record_channel_deposit(out, blockheight, PENALTY);
+		record_channel_deposit(out, out->tx_blockheight, PENALTY);
 
 	if (out->resolved->tx_type == OUR_DELAYED_RETURN_TO_WALLET
 	    || out->resolved->tx_type == THEIR_HTLC_FULFILL_TO_US
@@ -410,16 +436,16 @@ static bool grind_htlc_tx_fee(struct amount_sat *fee,
 		 *
 		 * The fee for an HTLC-timeout transaction:
 		 *   - If `option_anchors_zero_fee_htlc_tx` applies:
-		 *     1. MUST BE 0.
-		 *   - Otherwise, MUST BE calculated to match:
+		 *     1. MUST be 0.
+		 *   - Otherwise, MUST be calculated to match:
 		 *     1. Multiply `feerate_per_kw` by 663
 		 *        (666 if `option_anchor_outputs` applies)
 		 *        and divide by 1000 (rounding down).
 		 *
 		 * The fee for an HTLC-success transaction:
 		 *  - If `option_anchors_zero_fee_htlc_tx` applies:
-		 *    1. MUST BE 0.
-		 *  - MUST BE calculated to match:
+		 *    1. MUST be 0.
+		 *  - Otherwise, MUST be calculated to match:
 		 *     1. Multiply `feerate_per_kw` by 703
 		 *        (706 if `option_anchor_outputs` applies)
 		 *        and divide by 1000 (rounding down).
@@ -461,8 +487,8 @@ static bool set_htlc_timeout_fee(struct bitcoin_tx *tx,
 	 *
 	 * The fee for an HTLC-timeout transaction:
 	 *  - If `option_anchors_zero_fee_htlc_tx` applies:
-	 *    1. MUST BE 0.
-	 *  - Otherwise, MUST BE calculated to match:
+	 *    1. MUST be 0.
+	 *  - Otherwise, MUST be calculated to match:
 	 *    1. Multiply `feerate_per_kw` by 663 (666 if `option_anchor_outputs`
 	 *       applies) and divide by 1000 (rounding down).
 	 */
@@ -509,8 +535,8 @@ static void set_htlc_success_fee(struct bitcoin_tx *tx,
 	 *
 	 * The fee for an HTLC-success transaction:
 	 * - If `option_anchors_zero_fee_htlc_tx` applies:
-	 *   1. MUST BE 0.
-	 * - MUST BE calculated to match:
+	 *   1. MUST be 0.
+	 * - Otherwise, MUST be calculated to match:
 	 *   1. Multiply `feerate_per_kw` by 703 (706 if `option_anchor_outputs`
 	 *      applies) and divide by 1000 (rounding down).
 	 */
@@ -852,9 +878,18 @@ compute_penalty_output_amount(struct amount_sat initial_amount,
 	struct amount_sat max_output_amount;
 	struct amount_sat output_amount;
 	struct amount_sat deducted_amount;
+	struct amount_sat min_output_amount, max_fee;
 
 	assert(depth <= max_depth);
 	assert(depth > 0);
+
+	/* We never pay more than max_penalty_feerate; at some point,
+	 * it's clearly not working. */
+	max_fee = amount_tx_fee(max_penalty_feerate, weight);
+	if (!amount_sat_sub(&min_output_amount, initial_amount, max_fee))
+		/* We may just donate the whole output as fee, meaning
+		 * we get zero amount. */
+		min_output_amount = AMOUNT_SAT(0);
 
 	/* The difference between initial_amount, and the fee suggested
 	 * by min_rbf_bump, is the largest allowed output amount.
@@ -866,11 +901,7 @@ compute_penalty_output_amount(struct amount_sat initial_amount,
 	 */
 	if (!amount_sat_sub(&max_output_amount,
 			    initial_amount, min_rbf_bump(weight, depth - 1)))
-		/* If min_rbf_bump is larger than the initial_amount,
-		 * we should just donate the whole output as fee,
-		 * meaning we get 0 output amount.
-		 */
-		return AMOUNT_SAT(0);
+		return min_output_amount;
 
 	/* Map the depth / max_depth into a number between 0->1.  */
 	double x = (double) depth / (double) max_depth;
@@ -884,9 +915,14 @@ compute_penalty_output_amount(struct amount_sat initial_amount,
 
 	/* output_amount = initial_amount - deducted_amount.  */
 	if (!amount_sat_sub(&output_amount,
-			    initial_amount, deducted_amount))
-		/* If underflow, force to 0.  */
-		output_amount = AMOUNT_SAT(0);
+			    initial_amount, deducted_amount)) {
+		/* If underflow, force to min.  */
+		output_amount = min_output_amount;
+	}
+
+	/* If output below min, return min. */
+	if (amount_sat_less(output_amount, min_output_amount))
+		return min_output_amount;
 
 	/* If output exceeds max, return max.  */
 	if (amount_sat_less(max_output_amount, output_amount))
@@ -1723,16 +1759,26 @@ static void output_spent(struct tracked_output ***outs,
 		case OUTPUT_TO_US:
 		case DELAYED_OUTPUT_TO_US:
 			unknown_spend(out, tx_parts);
-			record_external_deposit(out, tx_blockheight, PENALIZED);
+			record_external_deposit(out, out->tx_blockheight,
+						PENALIZED);
 			break;
 
 		case THEIR_HTLC:
-			record_external_deposit(out, out->tx_blockheight,
-						HTLC_TIMEOUT);
-			record_external_spend(&tx_parts->txid, out,
-					      tx_blockheight, HTLC_TIMEOUT);
-
 			if (out->tx_type == THEIR_REVOKED_UNILATERAL) {
+				enum mvt_tag *tags;
+				tags = new_tag_arr(NULL, HTLC_TIMEOUT);
+				tal_arr_expand(&tags, STEALABLE);
+
+				record_external_deposit_tags(out, out->tx_blockheight,
+							     /* This takes tags */
+							     tal_dup_talarr(NULL,
+									    enum mvt_tag,
+									    tags));
+				record_external_spend_tags(&tx_parts->txid,
+							   out,
+							   tx_blockheight,
+							   tags);
+
 				/* we've actually got a 'new' output here */
 				steal_htlc_tx(out, outs, tx_parts,
 					      tx_blockheight,
@@ -1765,16 +1811,24 @@ static void output_spent(struct tracked_output ***outs,
 			handle_htlc_onchain_fulfill(out, tx_parts,
 						    &htlc_outpoint);
 
-			record_to_them_htlc_fulfilled(out, tx_blockheight);
-			record_external_spend(&tx_parts->txid, out,
-					      tx_blockheight, HTLC_FULFILL);
+			record_to_them_htlc_fulfilled(out, out->tx_blockheight);
 
 			if (out->tx_type == THEIR_REVOKED_UNILATERAL) {
+				enum mvt_tag *tags = new_tag_arr(NULL,
+								 HTLC_FULFILL);
+				tal_arr_expand(&tags, STEALABLE);
+				record_external_spend_tags(&tx_parts->txid,
+							   out,
+							   tx_blockheight,
+							   tags);
 				steal_htlc_tx(out, outs, tx_parts,
 					      tx_blockheight,
 					      OUR_HTLC_FULFILL_TO_THEM,
 					      &htlc_outpoint);
 			} else {
+				record_external_spend(&tx_parts->txid, out,
+						      tx_blockheight,
+						      HTLC_FULFILL);
 				/* BOLT #5:
 				 *
 				 * ## HTLC Output Handling: Local Commitment,
@@ -1803,7 +1857,7 @@ static void output_spent(struct tracked_output ***outs,
 			resolved_by_other(out, &tx_parts->txid,
 					  THEIR_DELAYED_CHEAT);
 
-			record_external_deposit(out, tx_blockheight, STOLEN);
+			record_external_deposit(out, out->tx_blockheight, STOLEN);
 			break;
 		/* Um, we don't track these! */
 		case OUTPUT_TO_THEM:
@@ -2041,15 +2095,12 @@ static void handle_preimage(struct tracked_output **outs,
 #if DEVELOPER
 static void memleak_remove_globals(struct htable *memtable, const tal_t *topctx)
 {
-	if (keyset)
-		memleak_remove_region(memtable, keyset, sizeof(*keyset));
-	memleak_remove_pointer(memtable, remote_per_commitment_point);
-	memleak_remove_pointer(memtable, remote_per_commitment_secret);
-	memleak_remove_pointer(memtable, topctx);
-	memleak_remove_region(memtable,
-			      missing_htlc_msgs, tal_bytelen(missing_htlc_msgs));
-	memleak_remove_region(memtable,
-			      queued_msgs, tal_bytelen(queued_msgs));
+	memleak_scan_obj(memtable, keyset);
+	memleak_ptr(memtable, remote_per_commitment_point);
+	memleak_ptr(memtable, remote_per_commitment_secret);
+	memleak_ptr(memtable, topctx);
+	memleak_scan_obj(memtable, missing_htlc_msgs);
+	memleak_scan_obj(memtable, queued_msgs);
 }
 
 static bool handle_dev_memleak(struct tracked_output **outs, const u8 *msg)
@@ -2060,10 +2111,12 @@ static bool handle_dev_memleak(struct tracked_output **outs, const u8 *msg)
 	if (!fromwire_onchaind_dev_memleak(msg))
 		return false;
 
-	memtable = memleak_find_allocations(tmpctx, msg, msg);
+	memtable = memleak_start(tmpctx);
+	memleak_ptr(memtable, msg);
+
 	/* Top-level context is parent of outs */
 	memleak_remove_globals(memtable, tal_parent(outs));
-	memleak_remove_region(memtable, outs, tal_bytelen(outs));
+	memleak_scan_obj(memtable, outs);
 
 	found_leak = dump_memleak(memtable, memleak_status_broken);
 	wire_sync_write(REQ_FD,
@@ -2126,26 +2179,32 @@ static void wait_for_resolved(struct tracked_output **outs)
 			take(towire_onchaind_all_irrevocably_resolved(outs)));
 }
 
-static int cmp_htlc_cltv(const struct htlc_stub *a,
-			 const struct htlc_stub *b, void *unused)
-{
-	if (a->cltv_expiry < b->cltv_expiry)
-		return -1;
-	else if (a->cltv_expiry > b->cltv_expiry)
-		return 1;
-	return 0;
-}
-
 struct htlcs_info {
 	struct htlc_stub *htlcs;
 	bool *tell_if_missing;
 	bool *tell_immediately;
 };
 
+struct htlc_with_tells {
+	struct htlc_stub htlc;
+	bool tell_if_missing, tell_immediately;
+};
+
+static int cmp_htlc_with_tells_cltv(const struct htlc_with_tells *a,
+				    const struct htlc_with_tells *b, void *unused)
+{
+	if (a->htlc.cltv_expiry < b->htlc.cltv_expiry)
+		return -1;
+	else if (a->htlc.cltv_expiry > b->htlc.cltv_expiry)
+		return 1;
+	return 0;
+}
+
 static struct htlcs_info *init_reply(const tal_t *ctx, const char *what)
 {
 	struct htlcs_info *htlcs_info = tal(ctx, struct htlcs_info);
 	u8 *msg;
+	struct htlc_with_tells *htlcs;
 
 	/* commit_num is 0 for mutual close, but we don't care about HTLCs
 	 * then anyway. */
@@ -2159,7 +2218,7 @@ static struct htlcs_info *init_reply(const tal_t *ctx, const char *what)
 	/* Read in htlcs */
 	for (;;) {
 		msg = wire_sync_read(queued_msgs, REQ_FD);
-		if (fromwire_onchaind_htlcs(htlcs_info, msg,
+		if (fromwire_onchaind_htlcs(tmpctx, msg,
 					    &htlcs_info->htlcs,
 					    &htlcs_info->tell_if_missing,
 					    &htlcs_info->tell_immediately)) {
@@ -2171,14 +2230,26 @@ static struct htlcs_info *init_reply(const tal_t *ctx, const char *what)
 		tal_arr_expand(&queued_msgs, msg);
 	}
 
-	/* We want htlcs to be a valid tal parent, so make it a zero-length
-	 * array if NULL (fromwire makes it NULL if there are no entries) */
-	if (!htlcs_info->htlcs)
-		htlcs_info->htlcs = tal_arr(htlcs_info, struct htlc_stub, 0);
+	/* One convenient structure, so we sort them together! */
+	htlcs = tal_arr(tmpctx, struct htlc_with_tells, tal_count(htlcs_info->htlcs));
+	for (size_t i = 0; i < tal_count(htlcs); i++) {
+		htlcs[i].htlc = htlcs_info->htlcs[i];
+		htlcs[i].tell_if_missing = htlcs_info->tell_if_missing[i];
+		htlcs[i].tell_immediately = htlcs_info->tell_immediately[i];
+	}
 
 	/* Sort by CLTV, so matches are in CLTV order (and easy to skip dups) */
-	asort(htlcs_info->htlcs, tal_count(htlcs_info->htlcs),
-	      cmp_htlc_cltv, NULL);
+	asort(htlcs, tal_count(htlcs), cmp_htlc_with_tells_cltv, NULL);
+
+	/* Now put them back (prev were allocated off tmpctx) */
+	htlcs_info->htlcs = tal_arr(htlcs_info, struct htlc_stub, tal_count(htlcs));
+	htlcs_info->tell_if_missing = tal_arr(htlcs_info, bool, tal_count(htlcs));
+	htlcs_info->tell_immediately = tal_arr(htlcs_info, bool, tal_count(htlcs));
+	for (size_t i = 0; i < tal_count(htlcs); i++) {
+		htlcs_info->htlcs[i] = htlcs[i].htlc;
+		htlcs_info->tell_if_missing[i] = htlcs[i].tell_if_missing;
+		htlcs_info->tell_immediately[i] = htlcs[i].tell_immediately;
+	}
 
 	return htlcs_info;
 }
@@ -2504,7 +2575,7 @@ static u8 *scriptpubkey_to_remote(const tal_t *ctx,
 	 * If `option_anchors` applies to the commitment
 	 * transaction, the `to_remote` output is encumbered by a one
 	 * block csv lock.
-	 *    <remote_pubkey> OP_CHECKSIGVERIFY 1 OP_CHECKSEQUENCEVERIFY
+	 *    <remotepubkey> OP_CHECKSIGVERIFY 1 OP_CHECKSEQUENCEVERIFY
 	 *
 	 *...
 	 * Otherwise, this output is a simple P2WPKH to `remotepubkey`.
@@ -3847,6 +3918,7 @@ int main(int argc, char *argv[])
 				   &delayed_to_us_feerate,
 				   &htlc_feerate,
 				   &penalty_feerate,
+				   &max_penalty_feerate,
 				   &dust_limit,
 				   &our_broadcast_txid,
 				   &scriptpubkey[LOCAL],
@@ -3894,6 +3966,9 @@ int main(int argc, char *argv[])
 						  &funding, tx_blockheight,
 						  our_msat,
 						  funding_sats,
+						  is_elements(chainparams) ?
+						  /* Minus 1, fee output */
+						  tal_count(tx->outputs) - 1 :
 						  tal_count(tx->outputs))));
 
 	status_debug("Remote per-commit point: %s",

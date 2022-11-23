@@ -5,6 +5,7 @@ CONNECTD_HEADERS := connectd/connectd_wiregen.h		\
 	connectd/connectd.h				\
 	connectd/peer_exchange_initmsg.h		\
 	connectd/handshake.h				\
+	connectd/gossip_rcvd_filter.h			\
 	connectd/multiplex.h				\
 	connectd/netaddress.h				\
 	connectd/onion_message.h			\
@@ -55,13 +56,13 @@ CONNECTD_COMMON_OBJS :=				\
 	common/hmac.o				\
 	common/status_wiregen.o			\
 	common/gossip_store.o			\
-	common/gossip_rcvd_filter.o		\
 	common/key_derive.o			\
 	common/memleak.o			\
 	common/msg_queue.o			\
 	common/node_id.o			\
-	common/onion.o				\
+	common/onion_decode.o			\
 	common/onionreply.o			\
+	common/onion_message_parse.o		\
 	common/ping.o				\
 	common/per_peer_state.o			\
 	common/psbt_open.o			\

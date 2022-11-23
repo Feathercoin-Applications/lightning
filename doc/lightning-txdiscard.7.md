@@ -17,7 +17,8 @@ RETURN VALUE
 
 [comment]: # (GENERATE-FROM-SCHEMA-START)
 On success, an object is returned, containing:
-- **unsigned_tx** (hex): the unsigned transaction
+
+- **unsigned\_tx** (hex): the unsigned transaction
 - **txid** (txid): the transaction id of *unsigned_tx*
 
 [comment]: # (GENERATE-FROM-SCHEMA-END)
@@ -44,4 +45,4 @@ RESOURCES
 
 Main web site: <https://github.com/ElementsProject/lightning>
 
-[comment]: # ( SHA256STAMP:ced935d8d9047fe1dfb746fc72aafc5b99a8b7b639f854a56478884e5205ffb9)
+[comment]: # ( SHA256STAMP:f52ad03cccaea672deefada22f0a11acff9d0c4f98ccfedca12759eaa6bac057)

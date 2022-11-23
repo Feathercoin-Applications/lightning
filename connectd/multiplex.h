@@ -10,9 +10,6 @@ struct peer;
 struct io_conn;
 struct feature_set;
 
-/* Set up peer->to_subd; sets fd_for_subd to pass to lightningd. */
-bool multiplex_subd_setup(struct peer *peer, int *fd_for_subd);
-
 /* Take over peer_conn as peer->to_peer */
 struct io_plan *multiplex_peer_setup(struct io_conn *peer_conn,
 				     struct peer *peer);
@@ -29,12 +26,12 @@ void setup_peer_gossip_store(struct peer *peer,
 			     const struct feature_set *our_features,
 			     const u8 *their_features);
 
-/* Start the process of flushing and closing the peer_conn */
-void close_peer_conn(struct peer *peer);
-
 /* When lightningd says to send a ping */
 void send_manual_ping(struct daemon *daemon, const u8 *msg);
 
 /* When lightningd says to send a custom message (from a plugin) */
 void send_custommsg(struct daemon *daemon, const u8 *msg);
+
+/* Lightningd wants to talk to you. */
+void peer_connect_subd(struct daemon *daemon, const u8 *msg, int fd);
 #endif /* LIGHTNING_CONNECTD_MULTIPLEX_H */

@@ -4,8 +4,8 @@ lightning-invoice -- Command for accepting payments
 SYNOPSIS
 --------
 
-**invoice** *msatoshi* *label* *description* [*expiry*]
-[*fallbacks*] [*preimage*] [*exposeprivatechannels*] [*cltv*]
+**invoice** *amount_msat* *label* *description* [*expiry*]
+[*fallbacks*] [*preimage*] [*exposeprivatechannels*] [*cltv*] [*deschashonly*]
 
 DESCRIPTION
 -----------
@@ -16,7 +16,7 @@ lightning daemon can use to pay this invoice. This token includes a
 *route hint* description of an incoming channel with capacity to pay the
 invoice, if any exists.
 
-The *msatoshi* parameter can be the string "any", which creates an
+The *amount_msat* parameter can be the string "any", which creates an
 invoice that can be paid with any amount. Otherwise it is a positive value in
 millisatoshi precision; it can be a whole number, or a whole number
 ending in *msat* or *sat*, or a number with three decimal places ending
@@ -29,13 +29,12 @@ of this invoice.
 
 The *description* is a short description of purpose of payment, e.g. *1
 cup of coffee*. This value is encoded into the BOLT11 invoice and is
-viewable by any node you send this invoice to. It must be UTF-8, and
-cannot use *\\u* JSON escape codes.
+viewable by any node you send this invoice to (unless *deschashonly* is
+true as described below). It must be UTF-8, and cannot use *\\u* JSON 
+escape codes.
 
-The *expiry* is optionally the time the invoice is valid for; without a
-suffix it is interpreted as seconds, otherwise suffixes *s*, *m*, *h*,
-*d*, *w* indicate seconds, minutes, hours, days and weeks respectively.
-If no value is provided the default of 604800 (1w) is used.
+The *expiry* is optionally the time the invoice is valid for, in seconds.
+If no value is provided the default of 604800 (1 week) is used.
 
 The *fallbacks* array is one or more fallback addresses to include in
 the invoice (in order from most-preferred to least): note that these
@@ -55,7 +54,7 @@ If specified, *exposeprivatechannels* overrides the default route hint
 logic, which will use unpublished channels only if there are no
 published channels. If *true* unpublished channels are always considered
 as a route hint candidate; if *false*, never.  If it is a short channel id
-(e.g. *1x1x3*) or array of short channel ids, only those specific channels
+(e.g. *1x1x3*) or array of short channel ids (or a remote alias), only those specific channels
 will be considered candidates, even if they are public or dead-ends.
 
 The route hint is selected from the set of incoming channels of which:
@@ -68,22 +67,29 @@ payment.
 If specified, *cltv* sets the *min_final_cltv_expiry* for the invoice.
 Otherwise, it's set to the parameter **cltv-final**.
 
+If *deschashonly* is true (default false), then the bolt11 returned
+contains a hash of the *description*, rather than the *description*
+itself: this allows much longer descriptions, but they must be
+communicated via some other mechanism.
+
 RETURN VALUE
 ------------
 
 [comment]: # (GENERATE-FROM-SCHEMA-START)
 On success, an object is returned, containing:
+
 - **bolt11** (string): the bolt11 string
-- **payment_hash** (hex): the hash of the *payment_preimage* which will prove payment (always 64 characters)
-- **payment_secret** (hex): the *payment_secret* to place in the onion (always 64 characters)
-- **expires_at** (u64): UNIX timestamp of when invoice expires
+- **payment\_hash** (hash): the hash of the *payment_preimage* which will prove payment (always 64 characters)
+- **payment\_secret** (secret): the *payment_secret* to place in the onion (always 64 characters)
+- **expires\_at** (u64): UNIX timestamp of when invoice expires
 
 The following warnings may also be returned:
-- **warning_capacity**: even using all possible channels, there's not enough incoming capacity to pay this invoice.
-- **warning_offline**: there would be enough incoming capacity, but some channels are offline, so there isn't.
-- **warning_deadends**: there would be enough incoming capacity, but some channels are dead-ends (no other public channels from those peers), so there isn't.
-- **warning_private_unused**: there would be enough incoming capacity, but some channels are unannounced and *exposeprivatechannels* is *false*, so there isn't.
-- **warning_mpp**: there is sufficient capacity, but not in a single channel, so the payer will have to use multi-part payments.
+
+- **warning\_capacity**: even using all possible channels, there's not enough incoming capacity to pay this invoice.
+- **warning\_offline**: there would be enough incoming capacity, but some channels are offline, so there isn't.
+- **warning\_deadends**: there would be enough incoming capacity, but some channels are dead-ends (no other public channels from those peers), so there isn't.
+- **warning\_private\_unused**: there would be enough incoming capacity, but some channels are unannounced and *exposeprivatechannels* is *false*, so there isn't.
+- **warning\_mpp**: there is sufficient capacity, but not in a single channel, so the payer will have to use multi-part payments.
 
 [comment]: # (GENERATE-FROM-SCHEMA-END)
 
@@ -113,4 +119,4 @@ RESOURCES
 
 Main web site: <https://github.com/ElementsProject/lightning>
 
-[comment]: # ( SHA256STAMP:f7d82473482e5454fc03641fddcfa97984e6a597e7ad377ced2cbed1512e91ed)
+[comment]: # ( SHA256STAMP:4dd2b9d74116f77ad09ad4162ba8438db79e79d1aa99b23e2c993d754327649d)

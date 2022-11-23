@@ -1,18 +1,19 @@
 Install
 =======
 
-1. [Library Requirements](#library-requirements)
-2. [Ubuntu](#to-build-on-ubuntu)
-3. [Fedora](#to-build-on-fedora)
-4. [FreeBSD](#to-build-on-freebsd)
-5. [OpenBSD](#to-build-on-openbsd)
-6. [NixOS](#to-build-on-nixos)
-7. [macOS](#to-build-on-macos)
-8. [Android](#to-cross-compile-for-android)
-9. [Raspberry Pi](#to-cross-compile-for-raspberry-pi)
-10. [Armbian](#to-compile-for-armbian)
-11. [Alpine](#to-compile-for-alpine)
-12. [Additional steps](#additional-steps)
+- [Library Requirements](#library-requirements)
+- [Ubuntu](#to-build-on-ubuntu)
+- [Fedora](#to-build-on-fedora)
+- [FreeBSD](#to-build-on-freebsd)
+- [OpenBSD](#to-build-on-openbsd)
+- [NixOS](#to-build-on-nixos)
+- [macOS](#to-build-on-macos)
+- [Arch Linux](#to-build-on-arch-linux)
+- [Android](#to-cross-compile-for-android)
+- [Raspberry Pi](#to-cross-compile-for-raspberry-pi)
+- [Armbian](#to-compile-for-armbian)
+- [Alpine](#to-compile-for-alpine)
+- [Additional steps](#additional-steps)
 
 Library Requirements
 --------------------
@@ -39,8 +40,8 @@ Get dependencies:
     sudo apt-get install -y \
       autoconf automake build-essential git libtool libgmp-dev libsqlite3-dev \
       python3 python3-pip net-tools zlib1g-dev libsodium-dev gettext
-    pip install --user poetry
-    poetry install
+    pip3 install --upgrade pip
+    pip3 install --user poetry
 
 If you don't have Bitcoin installed locally you'll need to install that
 as well. It's now available via [snapd](https://snapcraft.io/bitcoin-core).
@@ -56,24 +57,52 @@ Clone lightning:
     git clone https://github.com/ElementsProject/lightning.git
     cd lightning
 
+Checkout a release tag:
+
+    git checkout v0.11.2
+
 For development or running tests, get additional dependencies:
 
     sudo apt-get install -y valgrind libpq-dev shellcheck cppcheck \
-      libsecp256k1-dev jq
+      libsecp256k1-dev jq lowdown
 
-Build lightning:
+If you can't install `lowdown`, a version will be built in-tree.
 
+If you want to build the Rust plugins (currently, cln-grpc):
+
+	sudo apt-get install -y cargo rustfmt
+
+There are two ways to build core lightning, and this depends on how you want use it.
+
+To build cln to just install a tagged or master version you can use the following commands:
+
+    pip3 install --upgrade pip
+    pip3 install mako
     ./configure
     make
     sudo make install
+
+N.B: if you want disable Rust because you do not want use it or simple you do not want the grpc-plugin, you can use `./configure --disable-rust`.
+
+To build core lightning for development purpose you can use the following commands:
+
+    pip3 install poetry
+    poetry shell
+
+This will put you in a new shell to enter the following commands:
+
+    poetry install
+    ./configure --enable-developer
+    make
+    make check VALGRIND=0
+
+optionally, add `-j$(nproc)` after `make` to speed up compilation. (e.g. `make -j$(nproc)`)
 
 Running lightning:
 
     bitcoind &
     ./lightningd/lightningd &
     ./cli/lightning-cli help
-
-**Note**: You may need to include `testnet=1` in `bitcoin.conf`
 
 To Build on Fedora
 ---------------------
@@ -111,6 +140,11 @@ $ git clone https://github.com/ElementsProject/lightning.git
 $ cd lightning
 ```
 
+Checkout a release tag:
+```
+$ git checkout v0.11.2
+```
+
 Build and install lightning:
 ```
 $lightning> ./configure
@@ -135,7 +169,7 @@ To Build on FreeBSD
 
 OS version: FreeBSD 11.1-RELEASE or above
 
-c-lightning is in the FreeBSD ports, so install it as any other port
+Core Lightning is in the FreeBSD ports, so install it as any other port
 (dependencies are handled automatically):
 
     # pkg install c-lightning
@@ -144,12 +178,6 @@ for a binary, pre-compiled package. If you want to compile locally and
 fiddle with compile time options:
 
     # cd /usr/ports/net-p2p/c-lightning && make install
-
-mrkd is required to build man pages from markdown files (not done by the port):
-
-    # cd /usr/ports/devel/py-pip && make install
-    $ pip install --user poetry
-    $ poetry install
 
 See `/usr/ports/net-p2p/c-lightning/Makefile` for instructions on how to
 build from an arbitrary git commit, instead of the latest release tag.
@@ -180,7 +208,7 @@ pkg_add git python gmake py3-pip libtool gmp
 pkg_add automake # (select highest version, automake1.16.2 at time of writing)
 pkg_add autoconf # (select highest version, autoconf-2.69p2 at time of writing)
 ```
-Install `mako` and `mrkd` otherwise we run into build errors:
+Install `mako` otherwise we run into build errors:
 ```
 pip3.7 install --user poetry
 poetry install
@@ -240,6 +268,7 @@ If you need Python 3.x for mako (or get a mako build error):
     $ source ~/.bash_profile
     $ pyenv install 3.7.4
     $ pip install --upgrade pip
+    $ pip install poetry
 
 If you don't have bitcoind installed locally you'll need to install that
 as well:
@@ -256,16 +285,15 @@ Clone lightning:
     $ git clone https://github.com/ElementsProject/lightning.git
     $ cd lightning
 
-Configure Python 3.x & get mako:
+Checkout a release tag:
 
-    $ pyenv local 3.7.4
-    $ pip install mako
+    $ git checkout v0.11.2
 
 Build lightning:
 
-    $ pip install -r requirements.txt
+    $ poetry install
     $ ./configure
-    $ make
+    $ poetry run make
 
 Running lightning:
 
@@ -277,12 +305,53 @@ need to include `testnet=1`
     ./lightningd/lightningd &
     ./cli/lightning-cli help
 
+
+To install the built binaries into your system, you'll need to run `make install`:
+
+    make install
+
+On an M1 mac you may need to use this command instead:
+
+    sudo PATH="/usr/local/opt:$PATH"  LIBRARY_PATH=/opt/homebrew/lib CPATH=/opt/homebrew/include make install
+
+
+To Build on Arch Linux
+---------------------
+
+Install dependencies:
+
+```
+pacman --sync autoconf automake gcc git make python-pip
+pip install --user poetry
+```
+
+Clone Core Lightning:
+
+```
+$ git clone https://github.com/ElementsProject/lightning.git
+$ cd lightning
+```
+
+Build Core Lightning:
+
+```
+python -m poetry install
+./configure
+python -m poetry run make
+```
+
+Launch Core Lightning:
+
+```
+./lightningd/lightningd
+```
+
 To cross-compile for Android
 --------------------
 
 Make a standalone toolchain as per
 https://developer.android.com/ndk/guides/standalone_toolchain.html.
-For c-lightning you must target an API level of 24 or higher.
+For Core Lightning you must target an API level of 24 or higher.
 
 Depending on your toolchain location and target arch, source env variables
 such as:
@@ -342,9 +411,9 @@ Obtain and install cross-compiled versions of sqlite3, gmp and zlib:
 
 Download and build zlib:
 
-    wget https://zlib.net/zlib-1.2.11.tar.gz
-    tar xvf zlib-1.2.11.tar.gz
-    cd zlib-1.2.11
+    wget https://zlib.net/zlib-1.2.12.tar.gz
+    tar xvf zlib-1.2.12.tar.gz
+    cd zlib-1.2.12
     ./configure --prefix=$QEMU_LD_PREFIX
     make
     make install
@@ -367,7 +436,7 @@ Download and build gmp:
     make
     make install
 
-Then, build c-lightning with the following commands:
+Then, build Core Lightning with the following commands:
 
     ./configure
     make
@@ -378,7 +447,7 @@ For all the other Pi devices out there, consider using [Armbian](https://www.arm
 
 You can compile in `customize-image.sh` using the instructions for Ubuntu.
 
-A working example that compiles both bitcoind and c-lightning for Armbian can
+A working example that compiles both bitcoind and Core Lightning for Armbian can
 be found [here](https://github.com/Sjors/armbian-bitcoin-core).
 
 To compile for Alpine
@@ -386,8 +455,8 @@ To compile for Alpine
 Get dependencies:
 ```
 apk update
-apk add ca-certificates alpine-sdk autoconf automake git libtool \
-  gmp-dev sqlite-dev python python3 py3-mako net-tools zlib-dev libsodium gettext
+apk add --virtual .build-deps ca-certificates alpine-sdk autoconf automake git libtool \
+  gmp-dev sqlite-dev python3 py3-mako net-tools zlib-dev libsodium gettext
 ```
 Clone lightning:
 ```
@@ -404,8 +473,11 @@ make install
 Clean up:
 ```
 cd .. && rm -rf lightning
-apk del ca-certificates alpine-sdk autoconf automake git libtool \
-  gmp-dev sqlite python3 py3-mako net-tools zlib-dev libsodium gettext
+apk del .build-deps
+```
+Install runtime dependencies:
+```
+apk add gmp libgcc libsodium sqlite-libs zlib
 ```
 
 Additional steps

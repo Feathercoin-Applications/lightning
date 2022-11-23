@@ -17,6 +17,8 @@
 #include <wire/peer_wire.h>
 
 #define GOSSIP_STORE_TEMP_FILENAME "gossip_store.tmp"
+/* We write it as major version 0, minor version 11 */
+#define GOSSIP_STORE_VER ((0 << 5) | 11)
 
 struct gossip_store {
 	/* This is false when we're loading */
@@ -71,7 +73,7 @@ static ssize_t gossip_pwritev(int fd, const struct iovec *iov, int iovcnt,
 #endif /* !HAVE_PWRITEV */
 
 static bool append_msg(int fd, const u8 *msg, u32 timestamp,
-		       bool push, u64 *len)
+		       bool push, bool spam, u64 *len)
 {
 	struct gossip_hdr hdr;
 	u32 msglen;
@@ -84,6 +86,8 @@ static bool append_msg(int fd, const u8 *msg, u32 timestamp,
 	hdr.len = cpu_to_be32(msglen);
 	if (push)
 		hdr.len |= CPU_TO_BE32(GOSSIP_STORE_LEN_PUSH_BIT);
+	if (spam)
+		hdr.len |= CPU_TO_BE32(GOSSIP_STORE_LEN_RATELIMIT_BIT);
 	hdr.crc = cpu_to_be32(crc32c(timestamp, msg, msglen));
 	hdr.timestamp = cpu_to_be32(timestamp);
 
@@ -99,26 +103,12 @@ static bool append_msg(int fd, const u8 *msg, u32 timestamp,
 	return true;
 }
 
-#ifdef COMPAT_V082
-static u8 *mk_private_channelmsg(const tal_t *ctx,
-				 struct routing_state *rstate,
-				 const struct short_channel_id *scid,
-				 const struct node_id *remote_node_id,
-				 struct amount_sat sat,
-				 const u8 *features)
-{
-	const u8 *ann = private_channel_announcement(tmpctx, scid,
-						     &rstate->local_id,
-						     remote_node_id,
-						     features);
-
-	return towire_gossip_store_private_channel(ctx, sat, ann);
-}
-
-/* The upgrade from version 7 is trivial */
+/* v9 added the GOSSIP_STORE_LEN_RATELIMIT_BIT.
+ * v10 removed any remaining non-htlc-max channel_update.
+ */
 static bool can_upgrade(u8 oldversion)
 {
-	return oldversion == 7 || oldversion == 8;
+	return oldversion == 9 || oldversion == 10;
 }
 
 static bool upgrade_field(u8 oldversion,
@@ -127,51 +117,16 @@ static bool upgrade_field(u8 oldversion,
 {
 	assert(can_upgrade(oldversion));
 
-	if (fromwire_peektype(*msg) == WIRE_GOSSIPD_LOCAL_ADD_CHANNEL_OBS
-	    && oldversion == 7) {
-		/* Append two 0 bytes, for (empty) feature bits */
-		tal_resizez(msg, tal_bytelen(*msg) + 2);
+	if (oldversion == 10) {
+		/* Remove old channel_update with no htlc_maximum_msat */
+		if (fromwire_peektype(*msg) == WIRE_CHANNEL_UPDATE
+		    && tal_bytelen(*msg) == 130) {
+			*msg = tal_free(*msg);
+		}
 	}
 
-	/* We turn these (v8) into a WIRE_GOSSIP_STORE_PRIVATE_CHANNEL */
-	if (fromwire_peektype(*msg) == WIRE_GOSSIPD_LOCAL_ADD_CHANNEL_OBS) {
-		struct short_channel_id scid;
-		struct node_id remote_node_id;
-		struct amount_sat satoshis;
-		u8 *features;
-		u8 *storemsg;
-
-		if (!fromwire_gossipd_local_add_channel_obs(tmpctx, *msg,
-							&scid,
-							&remote_node_id,
-							&satoshis,
-							&features))
-			return false;
-
-		storemsg = mk_private_channelmsg(tal_parent(*msg),
-						 rstate,
-						 &scid,
-						 &remote_node_id,
-						 satoshis,
-						 features);
-		tal_free(*msg);
-		*msg = storemsg;
-	}
 	return true;
 }
-#else
-static bool can_upgrade(u8 oldversion)
-{
-	return false;
-}
-
-static bool upgrade_field(u8 oldversion,
-			  struct routing_state *rstate,
-			  u8 **msg)
-{
-	abort();
-}
-#endif /* !COMPAT_V082 */
 
 /* Read gossip store entries, copy non-deleted ones.  This code is written
  * as simply and robustly as possible! */
@@ -181,7 +136,7 @@ static u32 gossip_store_compact_offline(struct routing_state *rstate)
 	int old_fd, new_fd;
 	u64 oldlen, newlen;
 	struct gossip_hdr hdr;
-	u8 oldversion, version = GOSSIP_STORE_VERSION;
+	u8 oldversion, version = GOSSIP_STORE_VER;
 	struct stat st;
 
 	old_fd = open(GOSSIP_STORE_FILENAME, O_RDWR);
@@ -233,10 +188,26 @@ static u32 gossip_store_compact_offline(struct routing_state *rstate)
 			continue;
 		}
 
+		/* Check checksum (upgrade would overwrite, so do it now) */
+		if (be32_to_cpu(hdr.crc)
+		    != crc32c(be32_to_cpu(hdr.timestamp), msg, msglen)) {
+			status_broken("gossip_store_compact_offline: checksum verification failed? %08x should be %08x",
+				      be32_to_cpu(hdr.crc),
+				      crc32c(be32_to_cpu(hdr.timestamp), msg, msglen));
+			tal_free(msg);
+			goto close_and_delete;
+		}
+
 		if (oldversion != version) {
 			if (!upgrade_field(oldversion, rstate, &msg)) {
 				tal_free(msg);
 				goto close_and_delete;
+			}
+
+			/* It can tell us to delete record entirely. */
+			if (msg == NULL) {
+				deleted++;
+				continue;
 			}
 
 			/* Recalc msglen and header */
@@ -277,7 +248,7 @@ static u32 gossip_store_compact_offline(struct routing_state *rstate)
 	oldlen = lseek(old_fd, SEEK_END, 0);
 	newlen = lseek(new_fd, SEEK_END, 0);
 	append_msg(old_fd, towire_gossip_store_ended(tmpctx, newlen),
-		   0, false, &oldlen);
+		   0, true, false, &oldlen);
 	close(old_fd);
 	status_debug("gossip_store_compact_offline: %zu deleted, %zu copied",
 		     deleted, count);
@@ -315,11 +286,11 @@ struct gossip_store *gossip_store_new(struct routing_state *rstate,
 	if (read(gs->fd, &gs->version, sizeof(gs->version))
 	    == sizeof(gs->version)) {
 		/* Version match?  All good */
-		if (gs->version == GOSSIP_STORE_VERSION)
+		if (gs->version == GOSSIP_STORE_VER)
 			return gs;
 
 		status_unusual("Gossip store version %u not %u: removing",
-			       gs->version, GOSSIP_STORE_VERSION);
+			       gs->version, GOSSIP_STORE_VER);
 		if (ftruncate(gs->fd, 0) != 0)
 			status_failed(STATUS_FAIL_INTERNAL_ERROR,
 				      "Truncating store: %s", strerror(errno));
@@ -330,7 +301,7 @@ struct gossip_store *gossip_store_new(struct routing_state *rstate,
 				      strerror(errno));
 	}
 	/* Empty file, write version byte */
-	gs->version = GOSSIP_STORE_VERSION;
+	gs->version = GOSSIP_STORE_VER;
 	if (write(gs->fd, &gs->version, sizeof(gs->version))
 	    != sizeof(gs->version))
 		status_failed(STATUS_FAIL_INTERNAL_ERROR,
@@ -565,7 +536,7 @@ bool gossip_store_compact(struct gossip_store *gs)
 
 	/* Write end marker now new one is ready */
 	append_msg(gs->fd, towire_gossip_store_ended(tmpctx, len),
-		   0, false, &gs->len);
+		   0, true, false, &gs->len);
 
 	gs->count = count;
 	gs->deleted = 0;
@@ -586,19 +557,19 @@ disable:
 
 u64 gossip_store_add(struct gossip_store *gs, const u8 *gossip_msg,
 		     u32 timestamp, bool push,
-		     const u8 *addendum)
+		     bool spam, const u8 *addendum)
 {
 	u64 off = gs->len;
 
 	/* Should never get here during loading! */
 	assert(gs->writable);
 
-	if (!append_msg(gs->fd, gossip_msg, timestamp, push, &gs->len)) {
+	if (!append_msg(gs->fd, gossip_msg, timestamp, push, spam, &gs->len)) {
 		status_broken("Failed writing to gossip store: %s",
 			      strerror(errno));
 		return 0;
 	}
-	if (addendum && !append_msg(gs->fd, addendum, 0, false, &gs->len)) {
+	if (addendum && !append_msg(gs->fd, addendum, 0, false, false, &gs->len)) {
 		status_broken("Failed writing addendum to gossip store: %s",
 			      strerror(errno));
 		return 0;
@@ -615,7 +586,7 @@ u64 gossip_store_add_private_update(struct gossip_store *gs, const u8 *update)
 	/* A local update for an unannounced channel: not broadcastable, but
 	 * otherwise the same as a normal channel_update */
 	const u8 *pupdate = towire_gossip_store_private_update(tmpctx, update);
-	return gossip_store_add(gs, pupdate, 0, false, NULL);
+	return gossip_store_add(gs, pupdate, 0, false, false, NULL);
 }
 
 /* Returns index of following entry. */
@@ -675,7 +646,7 @@ void gossip_store_mark_channel_deleted(struct gossip_store *gs,
 				       const struct short_channel_id *scid)
 {
 	gossip_store_add(gs, towire_gossip_store_delete_chan(tmpctx, scid),
-			 0, false, NULL);
+			 0, false, false, NULL);
 }
 
 const u8 *gossip_store_get(const tal_t *ctx,
@@ -769,7 +740,8 @@ u32 gossip_store_load(struct routing_state *rstate, struct gossip_store *gs)
 		}
 
 		if (checksum != crc32c(be32_to_cpu(hdr.timestamp), msg, msglen)) {
-			bad = "Checksum verification failed";
+			bad = tal_fmt(tmpctx, "Checksum verification failed: %08x should be %08x",
+				      checksum, crc32c(be32_to_cpu(hdr.timestamp), msg, msglen));
 			goto badmsg;
 		}
 
@@ -783,17 +755,17 @@ u32 gossip_store_load(struct routing_state *rstate, struct gossip_store *gs)
 
 		switch (fromwire_peektype(msg)) {
 		case WIRE_GOSSIP_STORE_PRIVATE_CHANNEL: {
-			u8 *chan_ann;
+			u8 *priv_chan_ann;
 			struct amount_sat sat;
 			if (!fromwire_gossip_store_private_channel(msg, msg,
 								   &sat,
-								   &chan_ann)) {
+								   &priv_chan_ann)) {
 				bad = "Bad private_channel";
 				goto badmsg;
 			}
 
 			if (!routing_add_private_channel(rstate, NULL,
-							 sat, chan_ann,
+							 sat, priv_chan_ann,
 							 gs->len)) {
 				bad = "Bad add_private_channel";
 				goto badmsg;
@@ -830,6 +802,17 @@ u32 gossip_store_load(struct routing_state *rstate, struct gossip_store *gs)
 			chan_ann = tal_steal(gs, msg);
 			chan_ann_off = gs->len;
 			break;
+		case WIRE_GOSSIP_STORE_CHAN_DYING: {
+			struct short_channel_id scid;
+			u32 deadline;
+
+			if (!fromwire_gossip_store_chan_dying(msg, &scid, &deadline)) {
+				bad = "Bad gossip_store_chan_dying";
+				goto badmsg;
+			}
+			remember_chan_dying(rstate, &scid, deadline, gs->len);
+			break;
+		}
 		case WIRE_GOSSIP_STORE_PRIVATE_UPDATE:
 			if (!fromwire_gossip_store_private_update(tmpctx, msg, &msg)) {
 				bad = "invalid gossip_store_private_update";
@@ -839,7 +822,8 @@ u32 gossip_store_load(struct routing_state *rstate, struct gossip_store *gs)
 		case WIRE_CHANNEL_UPDATE:
 			if (!routing_add_channel_update(rstate,
 							take(msg), gs->len,
-							NULL, false)) {
+							NULL, false,
+							be32_to_cpu(hdr.len) & GOSSIP_STORE_LEN_RATELIMIT_BIT)) {
 				bad = "Bad channel_update";
 				goto badmsg;
 			}
@@ -848,7 +832,8 @@ u32 gossip_store_load(struct routing_state *rstate, struct gossip_store *gs)
 		case WIRE_NODE_ANNOUNCEMENT:
 			if (!routing_add_node_announcement(rstate,
 							   take(msg), gs->len,
-							   NULL, NULL)) {
+							   NULL, NULL,
+							   be32_to_cpu(hdr.len) & GOSSIP_STORE_LEN_RATELIMIT_BIT)) {
 				bad = "Bad node_announcement";
 				goto badmsg;
 			}

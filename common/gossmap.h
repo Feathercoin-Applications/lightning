@@ -8,7 +8,6 @@
 #include <common/fp16.h>
 
 struct node_id;
-struct point32;
 
 struct gossmap_node {
 	/* Offset in memory map for node_announce, or 0. */
@@ -90,6 +89,9 @@ void gossmap_remove_localmods(struct gossmap *map,
 u32 gossmap_node_idx(const struct gossmap *map, const struct gossmap_node *node);
 u32 gossmap_chan_idx(const struct gossmap *map, const struct gossmap_chan *chan);
 
+struct gossmap_node *gossmap_node_byidx(const struct gossmap *map, u32 idx);
+struct gossmap_chan *gossmap_chan_byidx(const struct gossmap *map, u32 idx);
+
 /* Every node_idx/chan_idx will be < these.
  * These values can change across calls to gossmap_check. */
 u32 gossmap_max_node_idx(const struct gossmap *map);
@@ -117,7 +119,7 @@ static inline bool gossmap_chan_set(const struct gossmap_chan *chan, int dir)
 	return chan->cupdate_off[dir] != 0;
 }
 
-/* Return capacity if it's known (fails only on race condition) */
+/* Return capacity if it's known (fails only on race condition, or a local mod) */
 bool gossmap_chan_get_capacity(const struct gossmap *map,
 			       const struct gossmap_chan *c,
 			       struct amount_sat *amount);
@@ -132,20 +134,25 @@ u8 *gossmap_node_get_announce(const tal_t *ctx,
 			      const struct gossmap *map,
 			      const struct gossmap_node *n);
 
-/* Return the feature bit (odd or even), or -1 if neither. */
+/* Return the channel feature bit (odd or even), or -1 if neither. */
 int gossmap_chan_get_feature(const struct gossmap *map,
 			     const struct gossmap_chan *c,
 			     int fbit);
 
-/* Return the feature bitmap */
+/* Return the channel feature bitmap */
 u8 *gossmap_chan_get_features(const tal_t *ctx,
 			      const struct gossmap *map,
 			      const struct gossmap_chan *c);
 
-/* Return the feature bit (odd or even), or -1 if neither (or no announcement) */
+/* Return the node feature bit (odd or even), or -1 if neither (or no announcement) */
 int gossmap_node_get_feature(const struct gossmap *map,
 			     const struct gossmap_node *n,
 			     int fbit);
+
+/* Return the node feature bitmap: NULL if no announcement. */
+u8 *gossmap_node_get_features(const tal_t *ctx,
+			      const struct gossmap *map,
+			      const struct gossmap_node *n);
 
 /* Returns details from channel_update (must be gossmap_chan_set, and
  * does not work for local_updatechan! */
@@ -158,7 +165,6 @@ void gossmap_chan_get_update_details(const struct gossmap *map,
 				     u32 *fee_base_msat,
 				     u32 *fee_proportional_millionths,
 				     struct amount_msat *htlc_minimum_msat,
-				     /* iff message_flags & 1 */
 				     struct amount_msat *htlc_maximum_msat);
 
 /* Given a struct node, get the nth channel, and tell us if we're half[0/1].
@@ -198,11 +204,4 @@ size_t gossmap_num_chans(const struct gossmap *map);
 struct gossmap_chan *gossmap_first_chan(const struct gossmap *map);
 struct gossmap_chan *gossmap_next_chan(const struct gossmap *map,
 				       struct gossmap_chan *prev);
-
-/* Each x-only pubkey has two possible values: we can figure out which by
- * examining the gossmap. */
-void gossmap_guess_node_id(const struct gossmap *map,
-			   const struct point32 *point32,
-			   struct node_id *id);
-
 #endif /* LIGHTNING_COMMON_GOSSMAP_H */

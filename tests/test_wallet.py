@@ -2,7 +2,6 @@ from bitcoin.rpc import JSONRPCError
 from decimal import Decimal
 from fixtures import *  # noqa: F401,F403
 from fixtures import TEST_NETWORK
-from flaky import flaky  # noqa: F401
 from pyln.client import RpcError, Millisatoshi
 from utils import (
     only_one, wait_for, sync_blockheight, EXPERIMENTAL_FEATURES,
@@ -13,6 +12,8 @@ from utils import (
 import os
 import pytest
 import subprocess
+import sys
+import time
 import unittest
 
 
@@ -28,7 +29,7 @@ HSM_BAD_PASSWORD = 22
 def test_withdraw(node_factory, bitcoind):
     amount = 1000000
     # Don't get any funds from previous runs.
-    l1 = node_factory.get_node(random_hsm=True)
+    l1 = node_factory.get_node(random_hsm=True, options={'log-level': 'io'})
     l2 = node_factory.get_node(random_hsm=True)
     addr = l1.rpc.newaddr()['bech32']
 
@@ -44,6 +45,9 @@ def test_withdraw(node_factory, bitcoind):
 
     waddr = l1.bitcoin.rpc.getnewaddress()
     # Now attempt to withdraw some (making sure we collect multiple inputs)
+
+    # These violate schemas!
+    l1.rpc.check_request_schemas = False
     with pytest.raises(RpcError):
         l1.rpc.withdraw('not an address', amount)
     with pytest.raises(RpcError):
@@ -52,8 +56,13 @@ def test_withdraw(node_factory, bitcoind):
         l1.rpc.withdraw(waddr, -amount)
     with pytest.raises(RpcError, match=r'Could not afford'):
         l1.rpc.withdraw(waddr, amount * 100)
+    l1.rpc.check_request_schemas = True
 
     out = l1.rpc.withdraw(waddr, 2 * amount)
+
+    # Side note: sendrawtransaction will trace back to withdrawl
+    myname = os.path.splitext(os.path.basename(sys.argv[0]))[0]
+    l1.daemon.wait_for_log(r": {}:withdraw#[0-9]*/cln:withdraw#[0-9]*/txprepare:sendpsbt#[0-9]*/cln:sendrawtransaction#[0-9]*\[OUT\]".format(myname))
 
     # Make sure bitcoind received the withdrawal
     unspent = l1.bitcoin.rpc.listunspent(0)
@@ -216,6 +225,9 @@ def test_minconf_withdraw(node_factory, bitcoind):
     bitcoind.generate_block(1)
 
     wait_for(lambda: len(l1.rpc.listfunds()['outputs']) == 10)
+    # This violates the request schema!
+    l1.rpc.check_request_schemas = False
+
     with pytest.raises(RpcError):
         l1.rpc.withdraw(destination=addr, satoshi=10000, feerate='normal', minconf=9999999)
 
@@ -507,7 +519,7 @@ def test_fundpsbt(node_factory, bitcoind, chainparams):
     feerate = '7500perkw'
 
     # Should get one input, plus some excess
-    funding = l1.rpc.fundpsbt(amount // 2, feerate, 0, reserve=False)
+    funding = l1.rpc.fundpsbt(amount // 2, feerate, 0, reserve=0)
     psbt = bitcoind.rpc.decodepsbt(funding['psbt'])
     # We can fuzz this up to 99 blocks back.
     assert psbt['tx']['locktime'] > bitcoind.rpc.getblockcount() - 100
@@ -520,7 +532,7 @@ def test_fundpsbt(node_factory, bitcoind, chainparams):
     assert 'reservations' not in funding
 
     # This should add 99 to the weight, but otherwise be identical (might choose different inputs though!) except for locktime.
-    funding2 = l1.rpc.fundpsbt(amount // 2, feerate, 99, reserve=False, locktime=bitcoind.rpc.getblockcount() + 1)
+    funding2 = l1.rpc.fundpsbt(amount // 2, feerate, 99, reserve=0, locktime=bitcoind.rpc.getblockcount() + 1)
     psbt2 = bitcoind.rpc.decodepsbt(funding2['psbt'])
     assert psbt2['tx']['locktime'] == bitcoind.rpc.getblockcount() + 1
     assert len(psbt2['tx']['vin']) == 1
@@ -537,7 +549,7 @@ def test_fundpsbt(node_factory, bitcoind, chainparams):
     with pytest.raises(RpcError, match=r"not afford"):
         l1.rpc.fundpsbt(amount // 2, feerate, 0, minconf=2)
 
-    funding3 = l1.rpc.fundpsbt(amount // 2, feerate, 0, reserve=False, excess_as_change=True)
+    funding3 = l1.rpc.fundpsbt(amount // 2, feerate, 0, reserve=0, excess_as_change=True)
     assert funding3['excess_msat'] == Millisatoshi(0)
     # Should have the excess msat as the output value (minus fee for change)
     psbt = bitcoind.rpc.decodepsbt(funding3['psbt'])
@@ -550,7 +562,7 @@ def test_fundpsbt(node_factory, bitcoind, chainparams):
     assert funding['excess_msat'] == change + change_fee
 
     # Should get two inputs.
-    psbt = bitcoind.rpc.decodepsbt(l1.rpc.fundpsbt(amount, feerate, 0, reserve=False)['psbt'])
+    psbt = bitcoind.rpc.decodepsbt(l1.rpc.fundpsbt(amount, feerate, 0, reserve=0)['psbt'])
     assert len(psbt['tx']['vin']) == 2
 
     # Should not use reserved outputs.
@@ -594,7 +606,7 @@ def test_utxopsbt(node_factory, bitcoind, chainparams):
     # Explicitly spend the first output above.
     funding = l1.rpc.utxopsbt(amount // 2, feerate, 0,
                               ['{}:{}'.format(outputs[0][0], outputs[0][1])],
-                              reserve=False)
+                              reserve=0)
     psbt = bitcoind.rpc.decodepsbt(funding['psbt'])
     # We can fuzz this up to 99 blocks back.
     assert psbt['tx']['locktime'] > bitcoind.rpc.getblockcount() - 100
@@ -610,7 +622,7 @@ def test_utxopsbt(node_factory, bitcoind, chainparams):
     start_weight = 99
     funding2 = l1.rpc.utxopsbt(amount // 2, feerate, start_weight,
                                ['{}:{}'.format(outputs[0][0], outputs[0][1])],
-                               reserve=False, locktime=bitcoind.rpc.getblockcount() + 1)
+                               reserve=0, locktime=bitcoind.rpc.getblockcount() + 1)
     psbt2 = bitcoind.rpc.decodepsbt(funding2['psbt'])
     assert psbt2['tx']['locktime'] == bitcoind.rpc.getblockcount() + 1
     assert psbt2['tx']['vin'] == psbt['tx']['vin']
@@ -638,7 +650,7 @@ def test_utxopsbt(node_factory, bitcoind, chainparams):
 
     funding3 = l1.rpc.utxopsbt(amount // 2, feerate, 0,
                                ['{}:{}'.format(outputs[0][0], outputs[0][1])],
-                               reserve=False,
+                               reserve=0,
                                excess_as_change=True)
     assert funding3['excess_msat'] == Millisatoshi(0)
     # Should have the excess msat as the output value (minus fee for change)
@@ -655,7 +667,7 @@ def test_utxopsbt(node_factory, bitcoind, chainparams):
     funding4 = l1.rpc.utxopsbt(amount - 3500,
                                feerate, 0,
                                ['{}:{}'.format(outputs[0][0], outputs[0][1])],
-                               reserve=False,
+                               reserve=0,
                                excess_as_change=True)
     assert 'change_outnum' not in funding4
 
@@ -688,6 +700,35 @@ def test_utxopsbt(node_factory, bitcoind, chainparams):
                     reservedok=True)
 
 
+def test_sign_external_psbt(node_factory, bitcoind, chainparams):
+    """
+    A PSBT w/ one of our inputs should be signable (we can fill
+    in the required UTXO data).
+    """
+    l1 = node_factory.get_node(feerates=(7500, 7500, 7500, 7500))
+    amount = 1000000
+    total_outs = 4
+
+    # Add a medley of funds to withdraw later, bech32 + p2sh-p2wpkh
+    for i in range(total_outs // 2):
+        bitcoind.rpc.sendtoaddress(l1.rpc.newaddr()['bech32'],
+                                   amount / 10**8)
+        bitcoind.rpc.sendtoaddress(l1.rpc.newaddr('p2sh-segwit')['p2sh-segwit'], amount / 10**8)
+
+    bitcoind.generate_block(1)
+    wait_for(lambda: len(l1.rpc.listfunds()['outputs']) == total_outs)
+
+    # Build a PSBT using all our inputs, externally
+    inputs = []
+    for inp in l1.rpc.listfunds()['outputs']:
+        inputs.append({'txid': inp['txid'], 'vout': inp['output']})
+    addr = l1.rpc.newaddr()['bech32']
+    psbt = bitcoind.rpc.createpsbt(inputs, [{addr: (amount * 3) / 10**8}])
+
+    l1.rpc.reserveinputs(psbt)
+    l1.rpc.signpsbt(psbt)
+
+
 def test_sign_and_send_psbt(node_factory, bitcoind, chainparams):
     """
     Tests for the sign + send psbt RPCs
@@ -713,8 +754,7 @@ def test_sign_and_send_psbt(node_factory, bitcoind, chainparams):
     # Make a PSBT out of our inputs
     funding = l1.rpc.fundpsbt(satoshi=out_total,
                               feerate=7500,
-                              startweight=42,
-                              reserve=True)
+                              startweight=42)
     assert len([x for x in l1.rpc.listfunds()['outputs'] if x['reserved']]) == 4
     psbt = bitcoind.rpc.decodepsbt(funding['psbt'])
     saved_input = psbt['tx']['vin'][0]
@@ -778,8 +818,7 @@ def test_sign_and_send_psbt(node_factory, bitcoind, chainparams):
     wait_for(lambda: len(l2.rpc.listfunds()['outputs']) == total_outs)
     l2_funding = l2.rpc.fundpsbt(satoshi=out_total,
                                  feerate=7500,
-                                 startweight=42,
-                                 reserve=True)
+                                 startweight=42)
 
     # Try to get L1 to sign it
     with pytest.raises(RpcError, match=r"No wallet inputs to sign"):
@@ -792,8 +831,7 @@ def test_sign_and_send_psbt(node_factory, bitcoind, chainparams):
     # Add some of our own PSBT inputs to it
     l1_funding = l1.rpc.fundpsbt(satoshi=out_total,
                                  feerate=7500,
-                                 startweight=42,
-                                 reserve=True)
+                                 startweight=42)
     l1_num_inputs = len(bitcoind.rpc.decodepsbt(l1_funding['psbt'])['tx']['vin'])
     l2_num_inputs = len(bitcoind.rpc.decodepsbt(l2_funding['psbt'])['tx']['vin'])
 
@@ -833,8 +871,7 @@ def test_sign_and_send_psbt(node_factory, bitcoind, chainparams):
     # Send a PSBT that's not ours
     l2_funding = l2.rpc.fundpsbt(satoshi=out_total,
                                  feerate=7500,
-                                 startweight=42,
-                                 reserve=True)
+                                 startweight=42)
     out_amt = Millisatoshi(l2_funding['excess_msat'])
     output_psbt = bitcoind.rpc.createpsbt([],
                                           [{addr: float((out_total + out_amt).to_btc())}])
@@ -861,26 +898,26 @@ def test_sign_and_send_psbt(node_factory, bitcoind, chainparams):
         l1.rpc.signpsbt(invalid_psbt)
 
     wallet_coin_mvts = [
-        {'type': 'chain_mvt', 'credit': 1000000000, 'debit': 0, 'tags': ['deposit']},
-        {'type': 'chain_mvt', 'credit': 1000000000, 'debit': 0, 'tags': ['deposit']},
-        {'type': 'chain_mvt', 'credit': 1000000000, 'debit': 0, 'tags': ['deposit']},
-        {'type': 'chain_mvt', 'credit': 1000000000, 'debit': 0, 'tags': ['deposit']},
-        {'type': 'chain_mvt', 'credit': 1000000000, 'debit': 0, 'tags': ['deposit']},
-        {'type': 'chain_mvt', 'credit': 1000000000, 'debit': 0, 'tags': ['deposit']},
-        {'type': 'chain_mvt', 'credit': 1000000000, 'debit': 0, 'tags': ['deposit']},
-        {'type': 'chain_mvt', 'credit': 1000000000, 'debit': 0, 'tags': ['deposit']},
-        {'type': 'chain_mvt', 'credit': 1000000000, 'debit': 0, 'tags': ['deposit']},
-        {'type': 'chain_mvt', 'credit': 1000000000, 'debit': 0, 'tags': ['deposit']},
-        {'type': 'chain_mvt', 'credit': 1000000000, 'debit': 0, 'tags': ['deposit']},
-        {'type': 'chain_mvt', 'credit': 1000000000, 'debit': 0, 'tags': ['deposit']},
-        {'type': 'chain_mvt', 'credit': 0, 'debit': 1000000000, 'tags': ['withdrawal']},
-        {'type': 'chain_mvt', 'credit': 0, 'debit': 1000000000, 'tags': ['withdrawal']},
-        {'type': 'chain_mvt', 'credit': 0, 'debit': 1000000000, 'tags': ['withdrawal']},
-        {'type': 'chain_mvt', 'credit': 0, 'debit': 1000000000, 'tags': ['withdrawal']},
-        {'type': 'chain_mvt', 'credit': 0, 'debit': 1000000000, 'tags': ['withdrawal']},
-        {'type': 'chain_mvt', 'credit': 0, 'debit': 1000000000, 'tags': ['withdrawal']},
-        {'type': 'chain_mvt', 'credit': 0, 'debit': 1000000000, 'tags': ['withdrawal']},
-        {'type': 'chain_mvt', 'credit': 0, 'debit': 1000000000, 'tags': ['withdrawal']},
+        {'type': 'chain_mvt', 'credit_msat': 1000000000, 'debit_msat': 0, 'tags': ['deposit']},
+        {'type': 'chain_mvt', 'credit_msat': 1000000000, 'debit_msat': 0, 'tags': ['deposit']},
+        {'type': 'chain_mvt', 'credit_msat': 1000000000, 'debit_msat': 0, 'tags': ['deposit']},
+        {'type': 'chain_mvt', 'credit_msat': 1000000000, 'debit_msat': 0, 'tags': ['deposit']},
+        {'type': 'chain_mvt', 'credit_msat': 1000000000, 'debit_msat': 0, 'tags': ['deposit']},
+        {'type': 'chain_mvt', 'credit_msat': 1000000000, 'debit_msat': 0, 'tags': ['deposit']},
+        {'type': 'chain_mvt', 'credit_msat': 1000000000, 'debit_msat': 0, 'tags': ['deposit']},
+        {'type': 'chain_mvt', 'credit_msat': 1000000000, 'debit_msat': 0, 'tags': ['deposit']},
+        {'type': 'chain_mvt', 'credit_msat': 1000000000, 'debit_msat': 0, 'tags': ['deposit']},
+        {'type': 'chain_mvt', 'credit_msat': 1000000000, 'debit_msat': 0, 'tags': ['deposit']},
+        {'type': 'chain_mvt', 'credit_msat': 1000000000, 'debit_msat': 0, 'tags': ['deposit']},
+        {'type': 'chain_mvt', 'credit_msat': 1000000000, 'debit_msat': 0, 'tags': ['deposit']},
+        {'type': 'chain_mvt', 'credit_msat': 0, 'debit_msat': 1000000000, 'tags': ['withdrawal']},
+        {'type': 'chain_mvt', 'credit_msat': 0, 'debit_msat': 1000000000, 'tags': ['withdrawal']},
+        {'type': 'chain_mvt', 'credit_msat': 0, 'debit_msat': 1000000000, 'tags': ['withdrawal']},
+        {'type': 'chain_mvt', 'credit_msat': 0, 'debit_msat': 1000000000, 'tags': ['withdrawal']},
+        {'type': 'chain_mvt', 'credit_msat': 0, 'debit_msat': 1000000000, 'tags': ['withdrawal']},
+        {'type': 'chain_mvt', 'credit_msat': 0, 'debit_msat': 1000000000, 'tags': ['withdrawal']},
+        {'type': 'chain_mvt', 'credit_msat': 0, 'debit_msat': 1000000000, 'tags': ['withdrawal']},
+        {'type': 'chain_mvt', 'credit_msat': 0, 'debit_msat': 1000000000, 'tags': ['withdrawal']},
     ]
 
     check_coin_moves(l1, 'wallet', wallet_coin_mvts, chainparams)
@@ -942,14 +979,14 @@ def test_transaction_annotations(node_factory, bitcoind):
     assert(len(outputs) == 1 and outputs[0]['status'] == 'confirmed')
     out = outputs[0]
     idx = out['output']
-    assert(idx in [0, 1] and out['value'] == 10**6)
+    assert(idx in [0, 1] and out['amount_msat'] == Millisatoshi("{}sat".format(10**6)))
 
     # ... and it should have an annotation on the output reading 'deposit'
     txs = l1.rpc.listtransactions()['transactions']
     assert(len(txs) == 1)
     tx = txs[0]
     output = tx['outputs'][idx]
-    assert(output['type'] == 'deposit' and output['msat'] == Millisatoshi(1000000000))
+    assert(output['type'] == 'deposit' and output['amount_msat'] == Millisatoshi(1000000000))
 
     # ... and all other output should be change, and have no annotations
     types = []
@@ -1035,20 +1072,21 @@ def test_hsm_secret_encryption(node_factory):
 
     # Test we cannot restore the same wallet with another password
     l1.daemon.opts.update({"encrypted-hsm": None})
-    l1.daemon.start(stdin=slave_fd, stderr=subprocess.STDOUT,
-                    wait_for_initialized=False)
+    l1.daemon.start(stdin=slave_fd, wait_for_initialized=False, stderr_redir=True)
     l1.daemon.wait_for_log(r'Enter hsm_secret password')
     write_all(master_fd, password[2:].encode("utf-8"))
-    l1.daemon.wait_for_log(r'Confirm hsm_secret password')
-    write_all(master_fd, password[2:].encode("utf-8"))
     assert(l1.daemon.proc.wait(WAIT_TIMEOUT) == HSM_BAD_PASSWORD)
-    assert(l1.daemon.is_in_log("Wrong password for encrypted hsm_secret."))
+    assert(l1.daemon.is_in_stderr("Wrong password for encrypted hsm_secret."))
+
+    # Not sure why this helps, but seems to reduce flakiness where
+    # tail() thread in testing/utils.py gets 'ValueError: readline of
+    # closed file' and we get `ValueError: Process died while waiting for logs`
+    # when waiting for "Server started with public key" below.
+    time.sleep(10)
 
     # Test we can restore the same wallet with the same password
     l1.daemon.start(stdin=slave_fd, wait_for_initialized=False)
     l1.daemon.wait_for_log(r'The hsm_secret is encrypted')
-    write_all(master_fd, password.encode("utf-8"))
-    l1.daemon.wait_for_log(r'Confirm hsm_secret password')
     write_all(master_fd, password.encode("utf-8"))
     l1.daemon.wait_for_log("Server started with public key")
     assert id == l1.rpc.getinfo()["id"]
@@ -1057,7 +1095,6 @@ def test_hsm_secret_encryption(node_factory):
     # We can restore the same wallet with the same password provided through stdin
     l1.daemon.start(stdin=subprocess.PIPE, wait_for_initialized=False)
     l1.daemon.proc.stdin.write(password.encode("utf-8"))
-    l1.daemon.proc.stdin.write(password.encode("utf-8"))
     l1.daemon.proc.stdin.flush()
     l1.daemon.wait_for_log("Server started with public key")
     assert id == l1.rpc.getinfo()["id"]
@@ -1065,9 +1102,9 @@ def test_hsm_secret_encryption(node_factory):
 
 class HsmTool(TailableProc):
     """Helper for testing the hsmtool as a subprocess"""
-    def __init__(self, *args):
+    def __init__(self, directory, *args):
         self.prefix = "hsmtool"
-        TailableProc.__init__(self)
+        TailableProc.__init__(self, os.path.join(directory, "hsmtool"))
         assert hasattr(self, "env")
         self.cmd_line = ["tools/hsmtool", *args]
 
@@ -1094,9 +1131,8 @@ def test_hsmtool_secret_decryption(node_factory):
 
     # We can't use a wrong password !
     master_fd, slave_fd = os.openpty()
-    hsmtool = HsmTool("decrypt", hsm_path)
-    hsmtool.start(stdin=slave_fd,
-                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    hsmtool = HsmTool(node_factory.directory, "decrypt", hsm_path)
+    hsmtool.start(stdin=slave_fd)
     hsmtool.wait_for_log(r"Enter hsm_secret password:")
     write_all(master_fd, "A wrong pass\n\n".encode("utf-8"))
     hsmtool.proc.wait(WAIT_TIMEOUT)
@@ -1104,8 +1140,7 @@ def test_hsmtool_secret_decryption(node_factory):
 
     # Decrypt it with hsmtool
     master_fd, slave_fd = os.openpty()
-    hsmtool.start(stdin=slave_fd,
-                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    hsmtool.start(stdin=slave_fd)
     hsmtool.wait_for_log(r"Enter hsm_secret password:")
     write_all(master_fd, password.encode("utf-8"))
     assert hsmtool.proc.wait(WAIT_TIMEOUT) == 0
@@ -1118,9 +1153,8 @@ def test_hsmtool_secret_decryption(node_factory):
 
     # Test we can encrypt it offline
     master_fd, slave_fd = os.openpty()
-    hsmtool = HsmTool("encrypt", hsm_path)
-    hsmtool.start(stdin=slave_fd,
-                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    hsmtool = HsmTool(node_factory.directory, "encrypt", hsm_path)
+    hsmtool.start(stdin=slave_fd)
     hsmtool.wait_for_log(r"Enter hsm_secret password:")
     write_all(master_fd, password.encode("utf-8"))
     hsmtool.wait_for_log(r"Confirm hsm_secret password:")
@@ -1133,12 +1167,10 @@ def test_hsmtool_secret_decryption(node_factory):
 
     l1.daemon.opts.update({"encrypted-hsm": None})
     master_fd, slave_fd = os.openpty()
-    l1.daemon.start(stdin=slave_fd, stderr=subprocess.STDOUT,
+    l1.daemon.start(stdin=slave_fd,
                     wait_for_initialized=False)
 
     l1.daemon.wait_for_log(r'The hsm_secret is encrypted')
-    write_all(master_fd, password.encode("utf-8"))
-    l1.daemon.wait_for_log(r'Confirm hsm_secret password')
     write_all(master_fd, password.encode("utf-8"))
     l1.daemon.wait_for_log("Server started with public key")
     print(node_id, l1.rpc.getinfo()["id"])
@@ -1147,9 +1179,8 @@ def test_hsmtool_secret_decryption(node_factory):
 
     # And finally test that we can also decrypt if encrypted with hsmtool
     master_fd, slave_fd = os.openpty()
-    hsmtool = HsmTool("decrypt", hsm_path)
-    hsmtool.start(stdin=slave_fd,
-                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    hsmtool = HsmTool(node_factory.directory, "decrypt", hsm_path)
+    hsmtool.start(stdin=slave_fd)
     hsmtool.wait_for_log(r"Enter hsm_secret password:")
     write_all(master_fd, password.encode("utf-8"))
     assert hsmtool.proc.wait(WAIT_TIMEOUT) == 0
@@ -1159,9 +1190,8 @@ def test_hsmtool_secret_decryption(node_factory):
 
     # We can roundtrip encryption and decryption using a password provided
     # through stdin.
-    hsmtool = HsmTool("encrypt", hsm_path)
-    hsmtool.start(stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                  stderr=subprocess.PIPE)
+    hsmtool = HsmTool(node_factory.directory, "encrypt", hsm_path)
+    hsmtool.start(stdin=subprocess.PIPE)
     hsmtool.proc.stdin.write(password.encode("utf-8"))
     hsmtool.proc.stdin.write(password.encode("utf-8"))
     hsmtool.proc.stdin.flush()
@@ -1169,9 +1199,8 @@ def test_hsmtool_secret_decryption(node_factory):
     assert hsmtool.proc.wait(WAIT_TIMEOUT) == 0
 
     master_fd, slave_fd = os.openpty()
-    hsmtool = HsmTool("decrypt", hsm_path)
-    hsmtool.start(stdin=slave_fd,
-                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    hsmtool = HsmTool(node_factory.directory, "decrypt", hsm_path)
+    hsmtool.start(stdin=slave_fd)
     hsmtool.wait_for_log("Enter hsm_secret password:")
     write_all(master_fd, password.encode("utf-8"))
     hsmtool.wait_for_log("Successfully decrypted")
@@ -1223,26 +1252,22 @@ def test_hsmtool_dump_descriptors(node_factory, bitcoind):
     assert len(bitcoind.rpc.listunspent(1, 1, [addr])) == 1
 
 
-@unittest.skipIf(VALGRIND, "It does not play well with prompt and key derivation.")
 def test_hsmtool_generatehsm(node_factory):
-    l1 = node_factory.get_node()
-    l1.stop()
+    l1 = node_factory.get_node(start=False)
     hsm_path = os.path.join(l1.daemon.lightning_dir, TEST_NETWORK,
                             "hsm_secret")
 
-    hsmtool = HsmTool("generatehsm", hsm_path)
+    hsmtool = HsmTool(node_factory.directory, "generatehsm", hsm_path)
 
     # You cannot re-generate an already existing hsm_secret
     master_fd, slave_fd = os.openpty()
-    hsmtool.start(stdin=slave_fd, stdout=subprocess.PIPE,
-                  stderr=subprocess.PIPE)
+    hsmtool.start(stdin=slave_fd)
     assert hsmtool.proc.wait(WAIT_TIMEOUT) == 2
     os.remove(hsm_path)
 
     # We can generate a valid hsm_secret from a wordlist and a "passphrase"
     master_fd, slave_fd = os.openpty()
-    hsmtool.start(stdin=slave_fd, stdout=subprocess.PIPE,
-                  stderr=subprocess.PIPE)
+    hsmtool.start(stdin=slave_fd)
     hsmtool.wait_for_log(r"Select your language:")
     write_all(master_fd, "0\n".encode("utf-8"))
     hsmtool.wait_for_log(r"Introduce your BIP39 word list")
@@ -1250,11 +1275,51 @@ def test_hsmtool_generatehsm(node_factory):
               "cake have wedding\n".encode("utf-8"))
     hsmtool.wait_for_log(r"Enter your passphrase:")
     write_all(master_fd, "This is actually not a passphrase\n".encode("utf-8"))
-    hsmtool.proc.wait(WAIT_TIMEOUT)
+    assert hsmtool.proc.wait(WAIT_TIMEOUT) == 0
     hsmtool.is_in_log(r"New hsm_secret file created")
+
+    # Check should pass.
+    hsmtool = HsmTool(node_factory.directory, "checkhsm", hsm_path)
+    master_fd, slave_fd = os.openpty()
+    hsmtool.start(stdin=slave_fd)
+    hsmtool.wait_for_log(r"Enter your passphrase:")
+    write_all(master_fd, "This is actually not a passphrase\n".encode("utf-8"))
+    hsmtool.wait_for_log(r"Select your language:")
+    write_all(master_fd, "0\n".encode("utf-8"))
+    hsmtool.wait_for_log(r"Introduce your BIP39 word list")
+    write_all(master_fd, "ritual idle hat sunny universe pluck key alpha wing "
+              "cake have wedding\n".encode("utf-8"))
+    assert hsmtool.proc.wait(WAIT_TIMEOUT) == 0
+    hsmtool.is_in_log(r"OK")
+
+    # Wrong mnemonic will fail.
+    master_fd, slave_fd = os.openpty()
+    hsmtool.start(stdin=slave_fd)
+    hsmtool.wait_for_log(r"Enter your passphrase:")
+    write_all(master_fd, "This is actually not a passphrase\n".encode("utf-8"))
+    hsmtool.wait_for_log(r"Select your language:")
+    write_all(master_fd, "0\n".encode("utf-8"))
+    hsmtool.wait_for_log(r"Introduce your BIP39 word list")
+    write_all(master_fd, "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about\n".encode("utf-8"))
+    assert hsmtool.proc.wait(WAIT_TIMEOUT) == 5
+    hsmtool.is_in_log(r"resulting hsm_secret did not match")
+
+    # Wrong passphrase will fail.
+    master_fd, slave_fd = os.openpty()
+    hsmtool.start(stdin=slave_fd)
+    hsmtool.wait_for_log(r"Enter your passphrase:")
+    write_all(master_fd, "This is actually not a passphrase \n".encode("utf-8"))
+    hsmtool.wait_for_log(r"Select your language:")
+    write_all(master_fd, "0\n".encode("utf-8"))
+    hsmtool.wait_for_log(r"Introduce your BIP39 word list")
+    write_all(master_fd, "ritual idle hat sunny universe pluck key alpha wing "
+              "cake have wedding\n".encode("utf-8"))
+    assert hsmtool.proc.wait(WAIT_TIMEOUT) == 5
+    hsmtool.is_in_log(r"resulting hsm_secret did not match")
 
     # We can start the node with this hsm_secret
     l1.start()
+    assert l1.info['id'] == '02244b73339edd004bc6dfbb953a87984c88e9e7c02ca14ef6ec593ca6be622ba7'
 
 
 # this test does a 'listtransactions' on a yet unconfirmed channel
@@ -1299,13 +1364,10 @@ def test_withdraw_nlocktime(node_factory):
     assert nlocktime > 0 and nlocktime <= tip
 
 
-@flaky
 @unittest.skipIf(VALGRIND, "A big loop is used to check fuzz.")
 def test_withdraw_nlocktime_fuzz(node_factory, bitcoind):
     """
     Test that we eventually fuzz nLockTime for withdrawal transactions.
-    Marked flaky "just in case" as we fuzz from 0 to 100 with a 10%
-    probability.
     """
     l1 = node_factory.get_node(1)
     l1.fundwallet(10**8)
@@ -1384,6 +1446,9 @@ def test_repro_4258(node_factory, bitcoind):
 
     addr = bitcoind.rpc.getnewaddress()
 
+    # These violate the request schema!
+    l1.rpc.check_request_schemas = False
+
     # Missing array parentheses for outputs
     with pytest.raises(RpcError, match=r"Expected an array of outputs"):
         l1.rpc.txprepare(
@@ -1401,6 +1466,8 @@ def test_repro_4258(node_factory, bitcoind):
             minconf=1,
             utxos="{txid}:{output}".format(**out)
         )
+
+    l1.rpc.check_request_schemas = True
 
     tx = l1.rpc.txprepare(
         outputs=[{addr: "all"}],

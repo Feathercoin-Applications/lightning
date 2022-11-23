@@ -15,7 +15,7 @@ LIGHTNINGD_TEST_COMMON_OBJS :=			\
 	common/daemon_conn.o			\
 	common/htlc_state.o			\
 	common/htlc_wire.o			\
-	common/json.o				\
+	common/json_parse_simple.o		\
 	common/key_derive.o			\
 	common/pseudorand.o			\
 	common/random_select.o			\
@@ -29,7 +29,7 @@ LIGHTNINGD_TEST_COMMON_OBJS :=			\
 	common/permute_tx.o			\
 	common/wireaddr.o			\
 
-$(LIGHTNINGD_TEST_PROGRAMS): $(CCAN_OBJS) $(BITCOIN_OBJS) $(WIRE_OBJS) $(LIGHTNINGD_TEST_COMMON_OBJS)
+$(LIGHTNINGD_TEST_PROGRAMS): $(CCAN_OBJS) $(BITCOIN_OBJS) $(WIRE_OBJS) $(LIGHTNINGD_TEST_COMMON_OBJS) $(WIRE_BOLT12_OBJS)
 
 $(LIGHTNINGD_TEST_OBJS): $(LIGHTNINGD_HDRS) $(LIGHTNINGD_SRC) $(LIGHTNINGD_SRC_NOHDR)
 

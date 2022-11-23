@@ -2,12 +2,12 @@
 #include <assert.h>
 #include <bitcoin/psbt.h>
 #include <bitcoin/script.h>
+#include <bitcoin/tx.h>
 #include <ccan/str/hex/hex.h>
 #include <ccan/tal/str/str.h>
 #include <common/type_to_string.h>
 #include <wally_psbt.h>
 #include <wire/wire.h>
-#include <bitcoin/tx.h>
 
 struct bitcoin_tx_output *new_tx_output(const tal_t *ctx,
 					struct amount_sat amount,
@@ -54,7 +54,7 @@ struct wally_tx_output *wally_tx_output(const tal_t *ctx,
 	}
 
 done:
-	tal_wally_end(tal_steal(ctx, output));
+	tal_wally_end_onto(ctx, output, struct wally_tx_output);
 	return output;
 }
 
@@ -520,7 +520,7 @@ struct bitcoin_tx *bitcoin_tx(const tal_t *ctx,
 	wally_tx_init_alloc(WALLY_TX_VERSION_2, nlocktime, input_count, output_count,
 			    &tx->wtx);
 	tal_add_destructor(tx, bitcoin_tx_destroy);
-	tal_wally_end(tal_steal(tx, tx->wtx));
+	tal_wally_end_onto(tx, tx->wtx, struct wally_tx);
 
 	tx->chainparams = chainparams;
 	tx->psbt = new_psbt(tx, tx->wtx);
@@ -548,7 +548,7 @@ struct bitcoin_tx *bitcoin_tx_with_psbt(const tal_t *ctx, struct wally_psbt *psb
 		tal_wally_start();
 		if (wally_tx_clone_alloc(psbt->tx, 0, &tx->wtx) != WALLY_OK)
 			tx->wtx = NULL;
-		tal_wally_end(tal_steal(tx, tx->wtx));
+		tal_wally_end_onto(tx, tx->wtx, struct wally_tx);
 		if (!tx->wtx)
 			return tal_free(tx);
 	}
@@ -574,7 +574,7 @@ static struct wally_tx *pull_wtx(const tal_t *ctx,
 		fromwire_fail(cursor, max);
 		wtx = tal_free(wtx);
 	}
-	tal_wally_end(tal_steal(ctx, wtx));
+	tal_wally_end_onto(ctx, wtx, struct wally_tx);
 
 	if (wtx) {
 		size_t wsize;
@@ -886,12 +886,18 @@ size_t bitcoin_tx_simple_input_weight(bool p2sh)
 
 size_t bitcoin_tx_2of2_input_witness_weight(void)
 {
-	/* witness[0] = ""
-	 * witness[1] = sig
-	 * witness[2] = sig
-	 * witness[3] = 2 key key 2 CHECKMULTISIG
-	 */
-	return 1 + (1 + 0) + (1 + 72) + (1 + 72) + (1 + 1 + 33 + 33 + 1 + 1);
+        /* BOLT #03:
+         * Signatures are 73 bytes long (the maximum length).
+         */
+	return 1 + /* Prefix: 4 elements to push on stack */
+		(1 + 0) + /* [0]: witness-marker-and-flag */
+		(1 + 73) + /* [1] Party A signature and length prefix */
+		(1 + 73) + /* [2] Party B signature and length prefix */
+		(1 + 1 + /* [3] length prefix and numpushes (2) */
+		 1 + 33 + /* pubkey A (with prefix) */
+		 1 + 33 + /* pubkey B (with prefix) */
+		 1 + 1 /* num sigs required and checkmultisig */
+		);
 }
 
 struct amount_sat change_amount(struct amount_sat excess, u32 feerate_perkw,

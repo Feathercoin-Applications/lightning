@@ -33,7 +33,7 @@
       "description": "description used in the invoice"
     },
     "payment_hash": {
-      "type": "hex",
+      "type": "hash",
       "description": "the hash of the *payment_preimage* which will prove payment",
       "maxLength": 64,
       "minLength": 64
@@ -79,9 +79,9 @@
             "type": "hex",
             "description": "offer for which this invoice was created"
           },
-          "payer_note": {
+          "invreq_payer_note": {
             "type": "string",
-            "description": "the optional *payer_note* from invoice_request which created this invoice"
+            "description": "the optional *invreq_payer_note* from invoice_request which created this invoice"
           }
         }
       },
@@ -101,6 +101,7 @@
           "payment_hash": {},
           "pay_index": {},
           "amount_received_msat": {},
+          "msatoshi_received": {},
           "paid_at": {},
           "payment_preimage": {}
         }
@@ -135,7 +136,7 @@
           "amount_msat": {},
           "description": {},
           "payment_hash": {},
-          "payer_note": {},
+          "invreq_payer_note": {},
           "local_offer_id": {},
           "pay_index": {
             "type": "u64",
@@ -145,12 +146,15 @@
             "type": "msat",
             "description": "how much was actually received"
           },
+          "msatoshi_received": {
+            "deprecated": "true"
+          },
           "paid_at": {
             "type": "u64",
             "description": "UNIX timestamp of when payment was received"
           },
           "payment_preimage": {
-            "type": "hex",
+            "type": "secret",
             "description": "SHA256 of this is the *payment_hash* offered in the invoice",
             "maxLength": 64,
             "minLength": 64
@@ -170,7 +174,7 @@
           "payment_hash": {},
           "expires_at": {},
           "pay_index": {},
-          "payer_note": {},
+          "invreq_payer_note": {},
           "local_offer_id": {}
         }
       }

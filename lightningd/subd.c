@@ -463,6 +463,7 @@ static bool handle_version(struct subd *sd, const u8 *msg)
 			   ver, version());
 		sd->ld->try_reexec = true;
 		/* Return us to toplevel lightningd.c */
+		log_debug(sd->ld->log, "io_break: %s", __func__);
 		io_break(sd->ld);
 		return false;
 	}
@@ -690,7 +691,8 @@ static struct io_plan *msg_setup(struct io_conn *conn, struct subd *sd)
 			 msg_send_next(conn, sd));
 }
 
-static struct subd *new_subd(struct lightningd *ld,
+static struct subd *new_subd(const tal_t *ctx,
+			     struct lightningd *ld,
 			     const char *name,
 			     void *channel,
 			     const struct node_id *node_id,
@@ -710,7 +712,7 @@ static struct subd *new_subd(struct lightningd *ld,
 						 const char *happenings),
 			     va_list *ap)
 {
-	struct subd *sd = tal(ld, struct subd);
+	struct subd *sd = tal(ctx, struct subd);
 	int msg_fd;
 	const char *debug_subd = NULL;
 	const char *shortname;
@@ -740,7 +742,7 @@ static struct subd *new_subd(struct lightningd *ld,
 		       &msg_fd,
 		       /* We only turn on subdaemon io logging if we're going
 			* to print it: too stressful otherwise! */
-		       log_print_level(sd->log) < LOG_DBG,
+		       log_print_level(sd->log, node_id) < LOG_DBG,
 		       ap);
 	if (sd->pid == (pid_t)-1) {
 		log_unusual(ld->log, "subd %s failed: %s",
@@ -791,7 +793,7 @@ struct subd *new_global_subd(struct lightningd *ld,
 	struct subd *sd;
 
 	va_start(ap, msgcb);
-	sd = new_subd(ld, name, NULL, NULL, NULL, false,
+	sd = new_subd(ld, ld, name, NULL, NULL, NULL, false,
 		      msgname, msgcb, NULL, NULL, &ap);
 	va_end(ap);
 
@@ -799,7 +801,8 @@ struct subd *new_global_subd(struct lightningd *ld,
 	return sd;
 }
 
-struct subd *new_channel_subd_(struct lightningd *ld,
+struct subd *new_channel_subd_(const tal_t *ctx,
+			       struct lightningd *ld,
 			       const char *name,
 			       void *channel,
 			       const struct node_id *node_id,
@@ -822,7 +825,7 @@ struct subd *new_channel_subd_(struct lightningd *ld,
 	struct subd *sd;
 
 	va_start(ap, billboardcb);
-	sd = new_subd(ld, name, channel, node_id, base_log,
+	sd = new_subd(ctx, ld, name, channel, node_id, base_log,
 		      talks_to_peer, msgname, msgcb, errcb, billboardcb, &ap);
 	va_end(ap);
 	return sd;
@@ -833,7 +836,8 @@ void subd_send_msg(struct subd *sd, const u8 *msg_out)
 	u16 type = fromwire_peektype(msg_out);
 	/* FIXME: We should use unique upper bits for each daemon, then
 	 * have generate-wire.py add them, just assert here. */
-	assert(!strstarts(sd->msgname(type), "INVALID"));
+	if (strstarts(sd->msgname(type), "INVALID"))
+		fatal("Sending %s an invalid message %s", sd->name, tal_hex(tmpctx, msg_out));
 	msg_enqueue(sd->outq, msg_out);
 }
 
@@ -898,15 +902,13 @@ struct subd *subd_shutdown(struct subd *sd, unsigned int seconds)
 	return tal_free(sd);
 }
 
-void subd_shutdown_remaining(struct lightningd *ld)
+void subd_shutdown_nonglobals(struct lightningd *ld)
 {
-	struct subd *subd;
+	struct subd *subd, *next;
 
-	/* We give them a second to finish exiting, before we kill
-	 * them in destroy_subd() */
-	sleep(1);
-
-	while ((subd = list_top(&ld->subds, struct subd, list)) != NULL) {
+	list_for_each_safe(&ld->subds, subd, next, list) {
+		if (!subd->channel)
+			continue;
 		/* Destructor removes from list */
 		io_close(subd->conn);
 	}

@@ -260,11 +260,11 @@ receive_offer(struct per_peer_state *pps,
 		/* BOLT #2:
 		 *
 		 *  - upon reconnection:
-		 *     - MUST ignore any redundant `funding_locked` it receives.
+		 *     - MUST ignore any redundant `channel_ready` it receives.
 		 */
 		/* This should only happen if we've made no commitments, but
 		 * we don't have to check that: it's their problem. */
-		if (fromwire_peektype(msg) == WIRE_FUNDING_LOCKED)
+		if (fromwire_peektype(msg) == WIRE_CHANNEL_READY)
 			msg = tal_free(msg);
 		/* BOLT #2:
 		 *     - if it has sent a previous `shutdown`:
@@ -278,10 +278,9 @@ receive_offer(struct per_peer_state *pps,
 	} while (!msg);
 
 	their_sig.sighash_type = SIGHASH_ALL;
-	close_tlvs = tlv_closing_signed_tlvs_new(msg);
-	if (!fromwire_closing_signed(msg, &their_channel_id,
+	if (!fromwire_closing_signed(msg, msg, &their_channel_id,
 				     &received_fee, &their_sig.s,
-				     close_tlvs))
+				     &close_tlvs))
 		peer_failed_warn(pps, channel_id,
 				 "Expected closing_signed: %s",
 				 tal_hex(tmpctx, msg));
@@ -292,7 +291,8 @@ receive_offer(struct per_peer_state *pps,
 	 *   - if the `signature` is not valid for either variant of closing transaction
 	 *   specified in [BOLT #3](03-transactions.md#closing-transaction)
 	 *   OR non-compliant with LOW-S-standard rule...:
-	 *     - MUST fail the connection.
+	 *     - MUST send a `warning` and close the connection, or send an
+	 *	 `error` and fail the channel.
 	 */
 	tx = close_tx(tmpctx, chainparams, pps, channel_id,
 		      local_wallet_index,
@@ -554,14 +554,12 @@ static void closing_dev_memleak(const tal_t *ctx,
 				u8 *scriptpubkey[NUM_SIDES],
 				const u8 *funding_wscript)
 {
-	struct htable *memtable;
+	struct htable *memtable = memleak_start(tmpctx);
 
-	memtable = memleak_find_allocations(tmpctx, NULL, NULL);
-
-	memleak_remove_pointer(memtable, ctx);
-	memleak_remove_pointer(memtable, scriptpubkey[LOCAL]);
-	memleak_remove_pointer(memtable, scriptpubkey[REMOTE]);
-	memleak_remove_pointer(memtable, funding_wscript);
+	memleak_ptr(memtable, ctx);
+	memleak_ptr(memtable, scriptpubkey[LOCAL]);
+	memleak_ptr(memtable, scriptpubkey[REMOTE]);
+	memleak_ptr(memtable, funding_wscript);
 
 	dump_memleak(memtable, memleak_status_broken);
 }
@@ -707,8 +705,10 @@ static void do_quickclose(struct amount_sat offer[NUM_SIDES],
 	/* BOLT #2:
 	 *   - if the message contains a `fee_range`:
 	 *     - if there is no overlap between that and its own `fee_range`:
-	 *       - SHOULD fail the connection
+	 *       - SHOULD send a warning
+	 *       - MUST fail the channel if it doesn't receive a satisfying `fee_range` after a reasonable amount of time
 	 */
+	/* (Note we satisfy the "MUST fail" by our close command unilteraltimeout) */
 	if (!get_overlap(our_feerange, their_feerange, &overlap)) {
 		peer_failed_warn(pps, channel_id,
 			       "Unable to agree on a feerate."

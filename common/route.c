@@ -25,7 +25,7 @@ bool route_can_carry(const struct gossmap *map,
 		       struct amount_msat amount,
 		       void *arg)
 {
-	if (!c->half[dir].enabled || !c->half[!dir].enabled)
+	if (!c->half[dir].enabled)
 		return false;
 	return route_can_carry_even_disabled(map, c, dir, amount, arg);
 }
@@ -101,16 +101,6 @@ static bool dijkstra_to_hops(struct route_hop **hops,
 	/* Find other end of channel. */
 	next = gossmap_nth_node(gossmap, c, !(*hops)[num_hops].direction);
 	gossmap_node_get_id(gossmap, next, &(*hops)[num_hops].node_id);
-	/* If we don't have a node_announcement, we *assume* modern */
-	if (next->nann_off == 0
-	    || gossmap_node_get_feature(gossmap, next, OPT_VAR_ONION) != -1)
-		(*hops)[num_hops].style = ROUTE_HOP_TLV;
-	else
-		(*hops)[num_hops].style = ROUTE_HOP_LEGACY;
-
-	/* These are (ab)used by others. */
-	(*hops)[num_hops].blinding = NULL;
-	(*hops)[num_hops].enctlv = NULL;
 
 	if (!dijkstra_to_hops(hops, gossmap, dij, next, amount, cltv))
 		return false;

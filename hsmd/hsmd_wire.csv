@@ -15,13 +15,21 @@ msgdata,hsmd_init,dev_force_privkey,?privkey,
 msgdata,hsmd_init,dev_force_bip32_seed,?secret,
 msgdata,hsmd_init,dev_force_channel_secrets,?secrets,
 msgdata,hsmd_init,dev_force_channel_secrets_shaseed,?sha256,
+msgdata,hsmd_init,hsm_wire_min_version,u32,
+msgdata,hsmd_init,hsm_wire_max_version,u32,
 
 #include <common/bip32.h>
-msgtype,hsmd_init_reply,111
-msgdata,hsmd_init_reply,node_id,node_id,
-msgdata,hsmd_init_reply,bip32,ext_key,
-msgdata,hsmd_init_reply,bolt12,point32,
-msgdata,hsmd_init_reply,onion_reply_secret,secret,
+# DEPRECATED after v0.12, remove in two versions!
+msgtype,hsmd_init_reply_v1,111
+msgdata,hsmd_init_reply_v1,node_id,node_id,
+msgdata,hsmd_init_reply_v1,bip32,ext_key,
+msgdata,hsmd_init_reply_v1,bolt12,u8,32
+msgdata,hsmd_init_reply_v1,onion_reply_secret,secret,
+
+msgtype,hsmd_init_reply_v2,113
+msgdata,hsmd_init_reply_v2,node_id,node_id,
+msgdata,hsmd_init_reply_v2,bip32,ext_key,
+msgdata,hsmd_init_reply_v2,bolt12,pubkey,
 
 # Declare a new channel.
 msgtype,hsmd_new_channel,30
@@ -137,6 +145,21 @@ msgdata,hsmd_sign_commitment_tx,commit_num,u64,
 
 msgtype,hsmd_sign_commitment_tx_reply,105
 msgdata,hsmd_sign_commitment_tx_reply,sig,bitcoin_signature,
+
+# Validate the counterparty's commitment signatures.
+msgtype,hsmd_validate_commitment_tx,35
+msgdata,hsmd_validate_commitment_tx,tx,bitcoin_tx,
+msgdata,hsmd_validate_commitment_tx,num_htlcs,u16,
+msgdata,hsmd_validate_commitment_tx,htlcs,simple_htlc,num_htlcs
+msgdata,hsmd_validate_commitment_tx,commit_num,u64,
+msgdata,hsmd_validate_commitment_tx,feerate,u32,
+msgdata,hsmd_validate_commitment_tx,sig,bitcoin_signature,
+msgdata,hsmd_validate_commitment_tx,num_htlc_sigs,u16,
+msgdata,hsmd_validate_commitment_tx,htlc_sigs,bitcoin_signature,num_htlc_sigs
+
+msgtype,hsmd_validate_commitment_tx_reply,135
+msgdata,hsmd_validate_commitment_tx_reply,old_commitment_secret,?secret,
+msgdata,hsmd_validate_commitment_tx_reply,next_per_commitment_point,pubkey,
 
 # Vaidate the counterparty's revocation secret
 msgtype,hsmd_validate_revocation,36
@@ -266,3 +289,12 @@ msgdata,hsmd_sign_option_will_fund_offer,channel_fee_proportional_basis_max,u16,
 
 msgtype,hsmd_sign_option_will_fund_offer_reply,126
 msgdata,hsmd_sign_option_will_fund_offer_reply,rsig,secp256k1_ecdsa_signature,
+
+# Derive pseudorandom secret
+msgtype,hsmd_derive_secret,27
+msgdata,hsmd_derive_secret,len,u16,
+msgdata,hsmd_derive_secret,info,u8,len
+
+# Reply with the derived secret
+msgtype,hsmd_derive_secret_reply,127
+msgdata,hsmd_derive_secret_reply,secret,secret,

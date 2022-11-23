@@ -18,6 +18,7 @@ RETURN VALUE
 
 [comment]: # (GENERATE-FROM-SCHEMA-START)
 On success, an object is returned, containing:
+
 - **perkw** (u32, optional): Value of *feerate_str* in kilosipa
 
 [comment]: # (GENERATE-FROM-SCHEMA-END)
@@ -33,7 +34,7 @@ not recognized.
 TRIVIA
 ------
 
-In C-lightning we like to call the weight unit "sipa"
+In CLN we like to call the weight unit "sipa"
 in honor of Pieter Wuille,
 who uses the name "sipa" on IRC and elsewhere.
 Internally we call the *perkw* style as "feerate per kilosipa".
@@ -43,4 +44,4 @@ RESOURCES
 
 Main web site: <https://github.com/ElementsProject/lightning>
 
-[comment]: # ( SHA256STAMP:045cab2977c7fcc12ed5267d4007a704028a00bc07f90265ed1cd7a46a414e63)
+[comment]: # ( SHA256STAMP:62a45d5091e5bdb4581a2986a66681616315999b8497038864ece8e3308c3f50)

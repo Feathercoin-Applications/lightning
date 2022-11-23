@@ -3,8 +3,11 @@
 #include <common/channel_config.h>
 #include <common/features.h>
 #include <common/initial_commit_tx.h>
+#include <common/status.h>
 #include <common/type_to_string.h>
+#include <hsmd/hsmd_wiregen.h>
 #include <openingd/common.h>
+#include <wire/wire_sync.h>
 
 /*~ This is the key function that checks that their configuration is reasonable:
  * it applied for both the case where they're trying to open a channel, and when
@@ -16,7 +19,6 @@ bool check_config_bounds(const tal_t *ctx,
 			 struct amount_msat min_effective_htlc_capacity,
 			 const struct channel_config *remoteconf,
 			 const struct channel_config *localconf,
-			 bool am_opener,
 			 bool option_anchor_outputs,
 			 char **err_reason)
 {
@@ -178,24 +180,6 @@ bool check_config_bounds(const tal_t *ctx,
 		return false;
 	}
 
-	/* BOLT #2:
-	 *
-	 * The receiving node MUST fail the channel if:
-	 *...
-	 *  - `dust_limit_satoshis` is greater than `channel_reserve_satoshis`.
-	 */
-	if (amount_sat_greater(remoteconf->dust_limit,
-			       remoteconf->channel_reserve)) {
-		*err_reason = tal_fmt(ctx,
-				      "dust_limit_satoshis %s"
-				      " too large for channel_reserve_satoshis %s",
-				      type_to_string(ctx, struct amount_sat,
-						     &remoteconf->dust_limit),
-				      type_to_string(ctx, struct amount_sat,
-						     &remoteconf->channel_reserve));
-		return false;
-	}
-
 	return true;
 }
 
@@ -225,3 +209,38 @@ u8 *no_upfront_shutdown_script(const tal_t *ctx,
 
 	return NULL;
 }
+
+void validate_initial_commitment_signature(int hsm_fd,
+					   struct bitcoin_tx *tx,
+					   struct bitcoin_signature *sig)
+{
+	struct existing_htlc **htlcs;
+	struct bitcoin_signature *htlc_sigs;
+	u32 feerate;
+	u64 commit_num;
+	const u8 *msg;
+	struct secret *old_secret;
+	struct pubkey next_point;
+
+	/* Validate the counterparty's signature. */
+	htlcs = tal_arr(NULL, struct existing_htlc *, 0);
+	htlc_sigs = tal_arr(NULL, struct bitcoin_signature, 0);
+	feerate = 0; /* unused since there are no htlcs */
+	commit_num = 0;
+	msg = towire_hsmd_validate_commitment_tx(NULL,
+						 tx,
+						 (const struct simple_htlc **) htlcs,
+						 commit_num,
+						 feerate,
+						 sig,
+						 htlc_sigs);
+	tal_free(htlc_sigs);
+	tal_free(htlcs);
+	wire_sync_write(hsm_fd, take(msg));
+	msg = wire_sync_read(tmpctx, hsm_fd);
+	if (!fromwire_hsmd_validate_commitment_tx_reply(tmpctx, msg, &old_secret, &next_point))
+		status_failed(STATUS_FAIL_HSM_IO,
+			      "Reading validate_commitment_tx reply: %s",
+			      tal_hex(tmpctx, msg));
+}
+

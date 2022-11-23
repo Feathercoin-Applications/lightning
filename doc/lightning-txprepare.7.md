@@ -10,7 +10,7 @@ DESCRIPTION
 -----------
 
 The **txprepare** RPC command creates an unsigned transaction which
-spends funds from c-lightning's internal wallet to the outputs specified
+spends funds from Core Lightning's internal wallet to the outputs specified
 in *outputs*.
 
 The *outputs* is the array of output that include *destination*
@@ -54,8 +54,9 @@ RETURN VALUE
 
 [comment]: # (GENERATE-FROM-SCHEMA-START)
 On success, an object is returned, containing:
+
 - **psbt** (string): the PSBT representing the unsigned transaction
-- **unsigned_tx** (hex): the unsigned transaction
+- **unsigned\_tx** (hex): the unsigned transaction
 - **txid** (txid): the transaction id of *unsigned_tx*; you hand this to lightning-txsend(7) or lightning-txdiscard(7), as the inputs of this transaction are reserved.
 
 [comment]: # (GENERATE-FROM-SCHEMA-END)
@@ -84,4 +85,4 @@ RESOURCES
 
 Main web site: <https://github.com/ElementsProject/lightning>
 
-[comment]: # ( SHA256STAMP:f16a12290870442316c8f3fb552627637610ab6a7cfed9082089040c78dce2be)
+[comment]: # ( SHA256STAMP:c13561bf71189143811cd4bd49db69c163b8443f1660931671eb1e95e0a7e3ff)

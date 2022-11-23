@@ -9,7 +9,7 @@ SYNOPSIS
 DESCRIPTION
 -----------
 
-The **withdraw** RPC command sends funds from c-lightning's internal
+The **withdraw** RPC command sends funds from Core Lightning's internal
 wallet to the address specified in *destination*.
 
 The address can be of any Bitcoin accepted type, including bech32.
@@ -42,6 +42,7 @@ RETURN VALUE
 
 [comment]: # (GENERATE-FROM-SCHEMA-START)
 On success, an object is returned, containing:
+
 - **tx** (hex): the fully signed bitcoin transaction
 - **txid** (txid): the transaction id of *tx*
 - **psbt** (string): the PSBT representing the unsigned transaction
@@ -73,4 +74,4 @@ RESOURCES
 
 Main web site: <https://github.com/ElementsProject/lightning>
 
-[comment]: # ( SHA256STAMP:cef8d48a59313019e671900621426733d47be2f0c22d5cb2d06ce0b9b7d43592)
+[comment]: # ( SHA256STAMP:fcfd3c91a3cee9bbd36e86edccb5d6407b19c2beda7de1f51ebba5fbd1c2340a)

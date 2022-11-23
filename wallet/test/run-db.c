@@ -40,11 +40,6 @@ void get_channel_basepoints(struct lightningd *ld UNNEEDED,
 			    struct basepoints *local_basepoints UNNEEDED,
 			    struct pubkey *local_funding_pubkey UNNEEDED)
 { fprintf(stderr, "get_channel_basepoints called!\n"); abort(); }
-/* Generated stub for new_log */
-struct log *new_log(const tal_t *ctx UNNEEDED, struct log_book *record UNNEEDED,
-		    const struct node_id *default_node_id UNNEEDED,
-		    const char *fmt UNNEEDED, ...)
-{ fprintf(stderr, "new_log called!\n"); abort(); }
 /* Generated stub for towire_hsmd_get_channel_basepoints */
 u8 *towire_hsmd_get_channel_basepoints(const tal_t *ctx UNNEEDED, const struct node_id *peerid UNNEEDED, u64 dbid UNNEEDED)
 { fprintf(stderr, "towire_hsmd_get_channel_basepoints called!\n"); abort(); }
@@ -206,17 +201,22 @@ static bool test_manip_columns(void)
 	CHECK_MSG(db_exec_prepared_v2(stmt), "db_exec_prepared must succeed");
 	CHECK_MSG(!db_err, "Simple correct SQL command");
 	tal_free(stmt);
-	/* Don't let it try to set a version field (we don't have one!) */
-	db->dirty = false;
-	db->changes = tal_arr(db, const char *, 0);
-	db_commit_transaction(db);
+
+	/* Needs vars table, since this changes db. */
+	stmt = db_prepare_v2(db, SQL("CREATE TABLE vars (name VARCHAR(32), intval);"));
+	CHECK_MSG(db_exec_prepared_v2(stmt), "db_exec_prepared must succeed");
+	CHECK_MSG(!db_err, "Simple correct SQL command");
+	tal_free(stmt);
+	stmt = db_prepare_v2(db, SQL("INSERT INTO vars VALUES ('data_version', 0);"));
+	CHECK_MSG(db_exec_prepared_v2(stmt), "db_exec_prepared must succeed");
+	CHECK_MSG(!db_err, "Simple correct SQL command");
+	tal_free(stmt);
 
 	/* Rename tablea.field1 -> table1.field1a. */
 	CHECK(db->config->rename_column(db, "tablea", "field1", "field1a"));
 	/* Remove tableb.field1. */
 	CHECK(db->config->delete_columns(db, "tableb", &field1, 1));
 
-	db_begin_transaction(db);
 	stmt = db_prepare_v2(db, SQL("SELECT id, field1a FROM tablea;"));
 	CHECK_MSG(db_query_prepared(stmt), "db_query_prepared must succeed");
 	CHECK_MSG(!db_err, "Simple correct SQL command");
@@ -267,10 +267,13 @@ int main(int argc, char *argv[])
 	common_setup(argv[0]);
 	ld->config = test_config;
 
-	ok &= test_empty_db_migrate(ld);
-	ok &= test_vars(ld);
-	ok &= test_primitives();
-	ok &= test_manip_columns();
+	/* We do a runtime test here, so we still check compile! */
+	if (HAVE_SQLITE3) {
+		ok &= test_empty_db_migrate(ld);
+		ok &= test_vars(ld);
+		ok &= test_primitives();
+		ok &= test_manip_columns();
+	}
 
 	tal_free(ld);
 	common_shutdown();

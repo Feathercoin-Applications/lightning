@@ -1,7 +1,7 @@
 # This dockerfile is meant to cross compile with a x64 machine for a arm64v8 host
 # It is using multi stage build: 
-# * downloader: Download litecoin/bitcoin and qemu binaries needed for c-lightning
-# * builder: Cross compile c-lightning dependencies, then c-lightning itself with static linking
+# * downloader: Download litecoin/bitcoin and qemu binaries needed for Core Lightning
+# * builder: Cross compile Core Lightning dependencies, then Core Lightning itself with static linking
 # * final: Copy the binaries required at runtime
 # The resulting image uploaded to dockerhub will only contain what is needed for runtime.
 # From the root of the repository, run "docker build -t yourimage:yourtag -f contrib/linuxarm64v8.Dockerfile ."
@@ -48,7 +48,7 @@ RUN mkdir /opt/litecoin && cd /opt/litecoin \
 FROM debian:buster-slim as builder
 
 ENV LIGHTNINGD_VERSION=master
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates autoconf automake build-essential gettext git libtool python3 python3-pip python3-setuptools python3-mako wget gnupg dirmngr git \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates autoconf automake build-essential gettext git libtool python3 python3-pip python3-setuptools python3-mako wget gnupg dirmngr git lowdown \
   libc6-arm64-cross gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
 ENV target_host=aarch64-linux-gnu
@@ -62,12 +62,12 @@ STRIP=${target_host}-strip \
 QEMU_LD_PREFIX=/usr/${target_host} \
 HOST=${target_host}
 
-RUN wget -q https://zlib.net/zlib-1.2.11.tar.gz \
-&& tar xvf zlib-1.2.11.tar.gz \
-&& cd zlib-1.2.11 \
+RUN wget -q https://zlib.net/zlib-1.2.12.tar.gz \
+&& tar xvf zlib-1.2.12.tar.gz \
+&& cd zlib-1.2.12 \
 && ./configure --prefix=$QEMU_LD_PREFIX \
 && make \
-&& make install && cd .. && rm zlib-1.2.11.tar.gz && rm -rf zlib-1.2.11
+&& make install && cd .. && rm zlib-1.2.12.tar.gz && rm -rf zlib-1.2.12
 
 RUN apt-get install -y --no-install-recommends unzip tclsh \
 && wget -q https://www.sqlite.org/2019/sqlite-src-3290000.zip \
@@ -91,7 +91,6 @@ RUN git clone --recursive /tmp/lightning . && \
 
 ARG DEVELOPER=0
 ENV PYTHON_VERSION=3
-RUN pip3 install mrkd
 RUN ./configure --prefix=/tmp/lightning_install --enable-static && make -j3 DEVELOPER=${DEVELOPER} && make install
 
 FROM arm64v8/debian:buster-slim as final

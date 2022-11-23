@@ -16,10 +16,7 @@ struct legacy_payload {
 /* struct holding the information necessary to call createonion */
 struct createonion_hop {
 	struct node_id pubkey;
-
-	enum route_hop_style style;
 	struct tlv_tlv_payload *tlv_payload;
-	struct legacy_payload *legacy_payload;
 };
 
 struct createonion_request {
@@ -63,6 +60,11 @@ struct payment_result {
  * get remove on failure. Success keeps the capacities, since the capacities
  * changed due to the successful HTLCs. */
 struct channel_hint {
+	/* The short_channel_id we're going to use when referring to
+	 * this channel. This can either be the real scid, or the
+	 * local alias. The `pay` algorithm doesn't really care which
+	 * one it is, but we'll prefer the scid as that's likely more
+	 * readable than the alias. */
 	struct short_channel_id_dir scid;
 
 	/* Upper bound on remove channels inferred from payment failures. */
@@ -176,14 +178,21 @@ struct payment {
 
 	/* Real destination we want to route to */
 	struct node_id *destination;
-	/* Do we know for sure that this supports OPT_VAR_ONION? */
-	bool destination_has_tlv;
 
 	/* Payment hash extracted from the invoice if any. */
 	struct sha256 *payment_hash;
 
 	/* Payment secret, from the invoice if any. */
 	struct secret *payment_secret;
+
+	/* Payment metadata, from the invoice if any. */
+	u8 *payment_metadata;
+
+	/* Blinded path (for bolt12) */
+	struct blinded_path *blindedpath;
+	struct blinded_payinfo *blindedpay;
+	struct amount_msat blindedfinalamount;
+	u32 blindedfinalcltv;
 
 	u64 groupid;
 	u32 partid;
@@ -257,13 +266,20 @@ struct payment {
 	 * true. Set only on the root payment. */
 	bool abort;
 
+	/* We only set invstring/description on one of our sendpays per group,
+	 * so we track when we've done that. */
+	bool invstring_used;
+
 	/* Serialized bolt11/12 string, kept attachd to the root so we can filter
 	 * by the invoice. */
 	const char *invstring;
 
-	/* If this is paying a local offer, this is the one (sendpay ensures we
-	 * don't pay twice for single-use offers) */
-	struct sha256 *local_offer_id;
+	/* Description, usually set if bolt11 has only description_hash */
+	const char *description;
+
+	/* If this is paying a local invoice_request, this is the one (sendpay
+	 * ensures we don't pay twice for single-use invoice requests) */
+	struct sha256 *local_invreq_id;
 
 	/* Textual explanation of why this payment was attempted. */
 	const char *why;

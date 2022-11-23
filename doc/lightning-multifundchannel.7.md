@@ -15,7 +15,7 @@ that is shared by all channels.
 
 If not already connected, **multifundchannel** will automatically attempt
 to connect; you may provide a *@host:port* hint appended to the node ID
-so that c-lightning can learn how to connect to the node;
+so that Core Lightning can learn how to connect to the node;
 see lightning-connect(7).
 
 Once the transaction is confirmed, normal channel operations may begin.
@@ -99,13 +99,14 @@ do not have a channel even if **multifundchannel** succeeded.
 
 [comment]: # (GENERATE-FROM-SCHEMA-START)
 On success, an object is returned, containing:
+
 - **tx** (hex): The raw transaction which funded the channel
 - **txid** (txid): The txid of the transaction which funded the channel
-- **channel_ids** (array of objects):
+- **channel\_ids** (array of objects):
   - **id** (pubkey): The peer we opened the channel with
   - **outnum** (u32): The 0-based output index showing which output funded the channel
-  - **channel_id** (hex): The channel_id of the resulting channel (always 64 characters)
-  - **close_to** (hex, optional): The raw scriptPubkey which mutual close will go to; only present if *close_to* parameter was specified and peer supports `option_upfront_shutdown_script`
+  - **channel\_id** (hex): The channel_id of the resulting channel (always 64 characters)
+  - **close\_to** (hex, optional): The raw scriptPubkey which mutual close will go to; only present if *close_to* parameter was specified and peer supports `option_upfront_shutdown_script`
 - **failed** (array of objects, optional): any peers we failed to open with (if *minchannels* was specified less than the number of destinations):
   - **id** (pubkey): The peer we failed to open the channel with
   - **method** (string): What stage we failed at (one of "connect", "openchannel_init", "fundchannel_start", "fundchannel_complete")
@@ -134,7 +135,7 @@ the channel funding process will cancel the funding locally, but
 the peer thinks the channel is already waiting for funding lockin.
 In that case, the next time we connect to the peer, our node will
 tell the peer to forget the channel, but some nodes (in particular,
-c-lightning nodes) will disconnect when our node tells them to
+Core Lightning nodes) will disconnect when our node tells them to
 forget the channel.
 If you immediately **multifundchannel** with that peer, it could
 trigger this connect-forget-disconnect behavior, causing the
@@ -158,4 +159,4 @@ RESOURCES
 ---------
 
 Main web site: <https://github.com/ElementsProject/lightning>
-[comment]: # ( SHA256STAMP:a6358ad8d361ae4104c727e6b8ab342923a613b78d5f13552794f827a1125e8b)
+[comment]: # ( SHA256STAMP:a507d57bbf36455924497c8354f41e225bc16f63f12fe01b4f7c4af37f0c6960)

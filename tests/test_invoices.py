@@ -4,18 +4,25 @@ from pyln.client import RpcError, Millisatoshi
 from utils import only_one, wait_for, wait_channel_quiescent, mine_funding_to_announce
 
 
+import os
 import pytest
+import sys
 import time
 import unittest
 
 
 def test_invoice(node_factory, chainparams):
-    l1, l2 = node_factory.line_graph(2, fundchannel=False)
+    l1, l2 = node_factory.line_graph(2, fundchannel=False, opts={'log-level': 'io'})
 
     addr1 = l2.rpc.newaddr('bech32')['bech32']
     addr2 = l2.rpc.newaddr('p2sh-segwit')['p2sh-segwit']
     before = int(time.time())
-    inv = l1.rpc.invoice(123000, 'label', 'description', '3700', [addr1, addr2])
+    inv = l1.rpc.invoice(123000, 'label', 'description', 3700, [addr1, addr2])
+
+    # Side note: invoice calls out to listincoming, so check JSON id is as expected
+    myname = os.path.splitext(os.path.basename(sys.argv[0]))[0]
+    l1.daemon.wait_for_log(r": {}:invoice#[0-9]*/cln:listincoming#[0-9]*\[OUT\]".format(myname))
+
     after = int(time.time())
     b11 = l1.rpc.decodepay(inv['bolt11'])
     assert b11['currency'] == chainparams['bip173_prefix']
@@ -55,7 +62,7 @@ def test_invoice(node_factory, chainparams):
     assert 'warning_capacity' in inv
 
     # Test cltv option.
-    inv = l1.rpc.invoice(123000, 'label3', 'description', '3700', cltv=99)
+    inv = l1.rpc.invoice(123000, 'label3', 'description', 3700, cltv=99)
     b11 = l1.rpc.decodepay(inv['bolt11'])
     assert b11['min_final_cltv_expiry'] == 99
 
@@ -132,7 +139,7 @@ def test_invoice_preimage(node_factory):
     invoice_preimage = "17b08f669513b7379728fc1abcea5eaf3448bc1eba55a68ca2cd1843409cdc04"
 
     # Make invoice and pay it
-    inv = l2.rpc.invoice(msatoshi=123456, label="inv", description="?", preimage=invoice_preimage)
+    inv = l2.rpc.invoice(amount_msat=123456, label="inv", description="?", preimage=invoice_preimage)
     payment = l1.rpc.pay(inv['bolt11'])
 
     # Check preimage was given.
@@ -153,7 +160,7 @@ def test_invoice_routeboost(node_factory, bitcoind):
 
     # Check routeboost.
     # Make invoice and pay it
-    inv = l2.rpc.invoice(msatoshi=123456, label="inv1", description="?")
+    inv = l2.rpc.invoice(amount_msat=123456, label="inv1", description="?")
     # Check routeboost.
     assert 'warning_private_unused' not in inv
     assert 'warning_capacity' not in inv
@@ -173,7 +180,7 @@ def test_invoice_routeboost(node_factory, bitcoind):
     wait_channel_quiescent(l1, l2)
 
     # Due to reserve & fees, l1 doesn't have capacity to pay this.
-    inv = l2.rpc.invoice(msatoshi=2 * (10**8) - 123456, label="inv2", description="?")
+    inv = l2.rpc.invoice(amount_msat=2 * (10**8) - 123456, label="inv2", description="?")
     # Check warning
     assert 'warning_capacity' in inv
     assert 'warning_private_unused' not in inv
@@ -226,9 +233,10 @@ def test_invoice_routeboost_private(node_factory, bitcoind):
     # Make sure channel is totally public.
     wait_for(lambda: [c['public'] for c in l2.rpc.listchannels(scid_dummy)['channels']] == [True, True])
 
+    alias = only_one(only_one(l1.rpc.listpeers(l2.info['id'])['peers'])['channels'])['alias']['local']
     # Since there's only one route, it will reluctantly hint that even
     # though it's private
-    inv = l2.rpc.invoice(msatoshi=123456, label="inv0", description="?")
+    inv = l2.rpc.invoice(amount_msat=123456, label="inv0", description="?")
     assert 'warning_private_unused' not in inv
     assert 'warning_capacity' not in inv
     assert 'warning_offline' not in inv
@@ -237,13 +245,15 @@ def test_invoice_routeboost_private(node_factory, bitcoind):
     # Route array has single route with single element.
     r = only_one(only_one(l1.rpc.decodepay(inv['bolt11'])['routes']))
     assert r['pubkey'] == l1.info['id']
-    assert r['short_channel_id'] == l1.rpc.listchannels()['channels'][0]['short_channel_id']
+    # It uses our private alias!
+    assert r['short_channel_id'] != l1.rpc.listchannels()['channels'][0]['short_channel_id']
+    assert r['short_channel_id'] == alias
     assert r['fee_base_msat'] == 1
     assert r['fee_proportional_millionths'] == 10
     assert r['cltv_expiry_delta'] == 6
 
     # If we explicitly say not to, it won't expose.
-    inv = l2.rpc.invoice(msatoshi=123456, label="inv1", description="?", exposeprivatechannels=False)
+    inv = l2.rpc.invoice(amount_msat=123456, label="inv1", description="?", exposeprivatechannels=False)
     assert 'warning_private_unused' in inv
     assert 'warning_capacity' not in inv
     assert 'warning_offline' not in inv
@@ -252,7 +262,7 @@ def test_invoice_routeboost_private(node_factory, bitcoind):
     assert 'routes' not in l1.rpc.decodepay(inv['bolt11'])
 
     # If we ask for it, we get it.
-    inv = l2.rpc.invoice(msatoshi=123456, label="inv1a", description="?", exposeprivatechannels=scid)
+    inv = l2.rpc.invoice(amount_msat=123456, label="inv1a", description="?", exposeprivatechannels=scid)
     assert 'warning_private_unused' not in inv
     assert 'warning_capacity' not in inv
     assert 'warning_offline' not in inv
@@ -261,13 +271,13 @@ def test_invoice_routeboost_private(node_factory, bitcoind):
     # Route array has single route with single element.
     r = only_one(only_one(l1.rpc.decodepay(inv['bolt11'])['routes']))
     assert r['pubkey'] == l1.info['id']
-    assert r['short_channel_id'] == l1.rpc.listchannels()['channels'][0]['short_channel_id']
+    assert r['short_channel_id'] == alias
     assert r['fee_base_msat'] == 1
     assert r['fee_proportional_millionths'] == 10
     assert r['cltv_expiry_delta'] == 6
 
     # Similarly if we ask for an array.
-    inv = l2.rpc.invoice(msatoshi=123456, label="inv1b", description="?", exposeprivatechannels=[scid])
+    inv = l2.rpc.invoice(amount_msat=123456, label="inv1b", description="?", exposeprivatechannels=[scid])
     assert 'warning_private_unused' not in inv
     assert 'warning_capacity' not in inv
     assert 'warning_offline' not in inv
@@ -276,7 +286,7 @@ def test_invoice_routeboost_private(node_factory, bitcoind):
     # Route array has single route with single element.
     r = only_one(only_one(l1.rpc.decodepay(inv['bolt11'])['routes']))
     assert r['pubkey'] == l1.info['id']
-    assert r['short_channel_id'] == l1.rpc.listchannels()['channels'][0]['short_channel_id']
+    assert r['short_channel_id'] == alias
     assert r['fee_base_msat'] == 1
     assert r['fee_proportional_millionths'] == 10
     assert r['cltv_expiry_delta'] == 6
@@ -290,7 +300,7 @@ def test_invoice_routeboost_private(node_factory, bitcoind):
     # Make sure channel is totally public.
     wait_for(lambda: [c['public'] for c in l2.rpc.listchannels(scid2)['channels']] == [True, True])
 
-    inv = l2.rpc.invoice(msatoshi=10**7, label="inv2", description="?")
+    inv = l2.rpc.invoice(amount_msat=10**7, label="inv2", description="?")
     print(inv)
     assert 'warning_deadends' in inv
     assert 'warning_private_unused' not in inv
@@ -299,7 +309,7 @@ def test_invoice_routeboost_private(node_factory, bitcoind):
     assert 'warning_mpp' not in inv
 
     # Unless we tell it to include it.
-    inv = l2.rpc.invoice(msatoshi=10**7, label="inv3", description="?", exposeprivatechannels=True)
+    inv = l2.rpc.invoice(amount_msat=10**7, label="inv3", description="?", exposeprivatechannels=True)
     assert 'warning_private_unused' not in inv
     assert 'warning_capacity' not in inv
     assert 'warning_offline' not in inv
@@ -308,12 +318,12 @@ def test_invoice_routeboost_private(node_factory, bitcoind):
     # Route array has single route with single element.
     r = only_one(only_one(l1.rpc.decodepay(inv['bolt11'])['routes']))
     assert r['pubkey'] == l1.info['id']
-    assert r['short_channel_id'] == l1.rpc.listchannels()['channels'][0]['short_channel_id']
+    assert r['short_channel_id'] == alias
     assert r['fee_base_msat'] == 1
     assert r['fee_proportional_millionths'] == 10
     assert r['cltv_expiry_delta'] == 6
 
-    inv = l2.rpc.invoice(msatoshi=10**7, label="inv4", description="?", exposeprivatechannels=scid)
+    inv = l2.rpc.invoice(amount_msat=10**7, label="inv4", description="?", exposeprivatechannels=scid)
     assert 'warning_private_unused' not in inv
     assert 'warning_capacity' not in inv
     assert 'warning_offline' not in inv
@@ -322,13 +332,13 @@ def test_invoice_routeboost_private(node_factory, bitcoind):
     # Route array has single route with single element.
     r = only_one(only_one(l1.rpc.decodepay(inv['bolt11'])['routes']))
     assert r['pubkey'] == l1.info['id']
-    assert r['short_channel_id'] == scid
+    assert r['short_channel_id'] == alias
     assert r['fee_base_msat'] == 1
     assert r['fee_proportional_millionths'] == 10
     assert r['cltv_expiry_delta'] == 6
 
     # Ask it explicitly to use a channel it can't (insufficient capacity)
-    inv = l2.rpc.invoice(msatoshi=(10**5) * 1000 + 1, label="inv5", description="?", exposeprivatechannels=scid2)
+    inv = l2.rpc.invoice(amount_msat=(10**5) * 1000 + 1, label="inv5", description="?", exposeprivatechannels=scid2)
     assert 'warning_private_unused' not in inv
     assert 'warning_deadends' not in inv
     assert 'warning_capacity' in inv
@@ -336,7 +346,7 @@ def test_invoice_routeboost_private(node_factory, bitcoind):
     assert 'warning_mpp' not in inv
 
     # Give it two options and it will pick one with suff capacity.
-    inv = l2.rpc.invoice(msatoshi=(10**5) * 1000 + 1, label="inv6", description="?", exposeprivatechannels=[scid2, scid])
+    inv = l2.rpc.invoice(amount_msat=(10**5) * 1000 + 1, label="inv6", description="?", exposeprivatechannels=[scid2, scid])
     assert 'warning_private_unused' not in inv
     assert 'warning_capacity' not in inv
     assert 'warning_offline' not in inv
@@ -345,7 +355,7 @@ def test_invoice_routeboost_private(node_factory, bitcoind):
     # Route array has single route with single element.
     r = only_one(only_one(l1.rpc.decodepay(inv['bolt11'])['routes']))
     assert r['pubkey'] == l1.info['id']
-    assert r['short_channel_id'] == scid
+    assert r['short_channel_id'] == alias
     assert r['fee_base_msat'] == 1
     assert r['fee_proportional_millionths'] == 10
     assert r['cltv_expiry_delta'] == 6
@@ -353,10 +363,10 @@ def test_invoice_routeboost_private(node_factory, bitcoind):
     # It will use an explicit exposeprivatechannels even if it thinks its a dead-end
     l0.rpc.close(l1.info['id'])
     l0.wait_for_channel_onchain(l1.info['id'])
-    bitcoind.generate_block(1)
+    bitcoind.generate_block(13)
     wait_for(lambda: l2.rpc.listchannels(scid_dummy)['channels'] == [])
 
-    inv = l2.rpc.invoice(msatoshi=123456, label="inv7", description="?", exposeprivatechannels=scid)
+    inv = l2.rpc.invoice(amount_msat=123456, label="inv7", description="?", exposeprivatechannels=scid)
     assert 'warning_private_unused' not in inv
     assert 'warning_capacity' not in inv
     assert 'warning_offline' not in inv
@@ -365,7 +375,7 @@ def test_invoice_routeboost_private(node_factory, bitcoind):
     # Route array has single route with single element.
     r = only_one(only_one(l1.rpc.decodepay(inv['bolt11'])['routes']))
     assert r['pubkey'] == l1.info['id']
-    assert r['short_channel_id'] == l1.rpc.listchannels()['channels'][0]['short_channel_id']
+    assert r['short_channel_id'] == alias
     assert r['fee_base_msat'] == 1
     assert r['fee_proportional_millionths'] == 10
     assert r['cltv_expiry_delta'] == 6
@@ -374,7 +384,7 @@ def test_invoice_routeboost_private(node_factory, bitcoind):
 def test_invoice_expiry(node_factory, executor):
     l1, l2 = node_factory.line_graph(2, fundchannel=True)
 
-    inv = l2.rpc.invoice(msatoshi=123000, label='test_pay', description='description', expiry=1)['bolt11']
+    inv = l2.rpc.invoice(amount_msat=123000, label='test_pay', description='description', expiry=1)['bolt11']
     time.sleep(2)
 
     with pytest.raises(RpcError):
@@ -401,7 +411,6 @@ def test_invoice_expiry(node_factory, executor):
     l2.rpc.invoice('any', 'inv1', 'description', 10)
     l2.rpc.invoice('any', 'inv2', 'description', 4)
     l2.rpc.invoice('any', 'inv3', 'description', 16)
-    creation = int(time.time())
 
     # Check waitinvoice correctly waits
     w1 = executor.submit(l2.rpc.waitinvoice, 'inv1')
@@ -427,46 +436,11 @@ def test_invoice_expiry(node_factory, executor):
     with pytest.raises(RpcError):
         w3.result()
 
-    # Test delexpiredinvoice
-    l2.rpc.delexpiredinvoice(maxexpirytime=creation + 8)
-    # only inv2 should have been deleted
-    assert len(l2.rpc.listinvoices()['invoices']) == 2
-    assert len(l2.rpc.listinvoices('inv2')['invoices']) == 0
-    # Test delexpiredinvoice all
-    l2.rpc.delexpiredinvoice()
-    # all invoices are expired and should be deleted
-    assert len(l2.rpc.listinvoices()['invoices']) == 0
-
-    # Test expiry suffixes.
     start = int(time.time())
-    inv = l2.rpc.invoice(msatoshi=123000, label='inv_s', description='description', expiry='1s')['bolt11']
+    inv = l2.rpc.invoice(amount_msat=123000, label='inv_s', description='description', expiry=1)['bolt11']
     end = int(time.time())
     expiry = only_one(l2.rpc.listinvoices('inv_s')['invoices'])['expires_at']
     assert expiry >= start + 1 and expiry <= end + 1
-
-    start = int(time.time())
-    inv = l2.rpc.invoice(msatoshi=123000, label='inv_m', description='description', expiry='1m')['bolt11']
-    end = int(time.time())
-    expiry = only_one(l2.rpc.listinvoices('inv_m')['invoices'])['expires_at']
-    assert expiry >= start + 60 and expiry <= end + 60
-
-    start = int(time.time())
-    inv = l2.rpc.invoice(msatoshi=123000, label='inv_h', description='description', expiry='1h')['bolt11']
-    end = int(time.time())
-    expiry = only_one(l2.rpc.listinvoices('inv_h')['invoices'])['expires_at']
-    assert expiry >= start + 3600 and expiry <= end + 3600
-
-    start = int(time.time())
-    inv = l2.rpc.invoice(msatoshi=123000, label='inv_d', description='description', expiry='1d')['bolt11']
-    end = int(time.time())
-    expiry = only_one(l2.rpc.listinvoices('inv_d')['invoices'])['expires_at']
-    assert expiry >= start + 24 * 3600 and expiry <= end + 24 * 3600
-
-    start = int(time.time())
-    inv = l2.rpc.invoice(msatoshi=123000, label='inv_w', description='description', expiry='1w')['bolt11']
-    end = int(time.time())
-    expiry = only_one(l2.rpc.listinvoices('inv_w')['invoices'])['expires_at']
-    assert expiry >= start + 7 * 24 * 3600 and expiry <= end + 7 * 24 * 3600
 
 
 @pytest.mark.developer("Too slow without --dev-fast-gossip")
@@ -554,6 +528,7 @@ def test_waitanyinvoice(node_factory, executor):
     r = executor.submit(l2.rpc.waitanyinvoice, pay_index, 0).result(timeout=5)
     assert r['label'] == 'inv4'
 
+    l2.rpc.check_request_schemas = False
     with pytest.raises(RpcError):
         l2.rpc.waitanyinvoice('non-number')
 
@@ -583,11 +558,11 @@ def test_waitanyinvoice_reversed(node_factory, executor):
     assert r['label'] == 'inv1'
 
 
-def test_autocleaninvoice(node_factory):
-    l1 = node_factory.get_node()
+def test_autocleaninvoice_deprecated(node_factory):
+    l1 = node_factory.get_node(options={'allow-deprecated-apis': True})
 
-    l1.rpc.invoice(msatoshi=12300, label='inv1', description='description1', expiry=4)
-    l1.rpc.invoice(msatoshi=12300, label='inv2', description='description2', expiry=12)
+    l1.rpc.invoice(amount_msat=12300, label='inv1', description='description1', expiry=4)
+    l1.rpc.invoice(amount_msat=12300, label='inv2', description='description2', expiry=12)
     l1.rpc.autocleaninvoice(cycle_seconds=8, expired_by=2)
     start_time = time.time()
 
@@ -623,6 +598,13 @@ def test_autocleaninvoice(node_factory):
     assert len(l1.rpc.listinvoices('inv1')['invoices']) == 0
     assert len(l1.rpc.listinvoices('inv2')['invoices']) == 0
 
+    # stress test
+    l1.rpc.autocleaninvoice(cycle_seconds=0)
+    l1.rpc.autocleaninvoice(cycle_seconds=1)
+    l1.rpc.autocleaninvoice(cycle_seconds=0)
+    time.sleep(1)
+    l1.rpc.autocleaninvoice(cycle_seconds=1, expired_by=1)
+
 
 def test_decode_unknown(node_factory):
     l1 = node_factory.get_node()
@@ -651,17 +633,15 @@ def test_amountless_invoice(node_factory):
     inv = l2.rpc.invoice('any', 'lbl', 'desc')['bolt11']
     i = l2.rpc.listinvoices()['invoices']
     assert(len(i) == 1)
-    assert('msatoshi_received' not in i[0])
     assert('amount_received_msat' not in i[0])
     assert(i[0]['status'] == 'unpaid')
     details = l1.rpc.decodepay(inv)
     assert('msatoshi' not in details)
 
-    l1.rpc.pay(inv, msatoshi=1337)
+    l1.rpc.pay(inv, amount_msat=1337)
 
     i = l2.rpc.listinvoices()['invoices']
     assert(len(i) == 1)
-    assert(i[0]['msatoshi_received'] == 1337)
     assert(i[0]['amount_received_msat'] == Millisatoshi(1337))
     assert(i[0]['status'] == 'paid')
 
@@ -712,3 +692,52 @@ def test_listinvoices_filter(node_factory):
     for q in queries:
         r = l1.rpc.listinvoices(**q)
         assert len(r['invoices']) == 0
+
+
+def test_invoice_deschash(node_factory, chainparams):
+    l1, l2 = node_factory.line_graph(2)
+
+    # BOLT #11:
+    # * `h`: tagged field: hash of description
+    #  * `p5`: `data_length` (`p` = 1, `5` = 20; 1 * 32 + 20 == 52)
+    #  * `8yjmdan79s6qqdhdzgynm4zwqd5d7xmw5fk98klysy043l2ahrqs`: SHA256 of 'One piece of chocolate cake, one icecream cone, one pickle, one slice of swiss cheese, one slice of salami, one lollypop, one piece of cherry pie, one sausage, one cupcake, and one slice of watermelon'
+    inv = l2.rpc.invoice(42, 'label', 'One piece of chocolate cake, one icecream cone, one pickle, one slice of swiss cheese, one slice of salami, one lollypop, one piece of cherry pie, one sausage, one cupcake, and one slice of watermelon', deschashonly=True)
+    assert '8yjmdan79s6qqdhdzgynm4zwqd5d7xmw5fk98klysy043l2ahrqs' in inv['bolt11']
+
+    b11 = l2.rpc.decodepay(inv['bolt11'])
+    assert 'description' not in b11
+    assert b11['description_hash'] == '3925b6f67e2c340036ed12093dd44e0368df1b6ea26c53dbe4811f58fd5db8c1'
+
+    listinv = only_one(l2.rpc.listinvoices()['invoices'])
+    assert listinv['description'] == 'One piece of chocolate cake, one icecream cone, one pickle, one slice of swiss cheese, one slice of salami, one lollypop, one piece of cherry pie, one sausage, one cupcake, and one slice of watermelon'
+
+    # To pay it we need to provide the (correct!) description.
+    with pytest.raises(RpcError, match=r'you did not provide description parameter'):
+        l1.rpc.pay(inv['bolt11'])
+
+    with pytest.raises(RpcError, match=r'does not match description'):
+        l1.rpc.pay(inv['bolt11'], description=listinv['description'][:-1])
+
+    l1.rpc.pay(inv['bolt11'], description=listinv['description'])
+
+    # Description will be in some.
+    found = False
+    for p in l1.rpc.listsendpays()['payments']:
+        if 'description' in p:
+            found = True
+            assert p['description'] == listinv['description']
+    assert found
+
+    assert only_one(l1.rpc.listpays(inv['bolt11'])['pays'])['description'] == listinv['description']
+
+    # Try removing description.
+    l2.rpc.delinvoice('label', "paid", desconly=True)
+    assert 'description' not in only_one(l2.rpc.listinvoices()['invoices'])
+
+    with pytest.raises(RpcError, match=r'description already removed'):
+        l2.rpc.delinvoice('label', "paid", desconly=True)
+
+    # desc-hashes lands in bookkeeper data (description)
+    wait_for(lambda: len([ev for ev in l1.rpc.bkpr_listincome()['income_events'] if ev['tag'] == 'invoice']) == 1)
+    inv = only_one([ev for ev in l1.rpc.bkpr_listincome()['income_events'] if ev['tag'] == 'invoice'])
+    assert inv['description'] == b11['description_hash']

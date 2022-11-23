@@ -11,7 +11,7 @@ DESCRIPTION
 
 The **createonion** RPC command allows the caller to create a custom onion
 with custom payloads at each hop in the route. A custom onion can be used to
-implement protocol extensions that are not supported by c-lightning directly.
+implement protocol extensions that are not supported by Core Lightning directly.
 
 The *hops* parameter is a JSON list of dicts, each specifying a node and the
 payload destined for that node. The following is an example of a 3 hop onion:
@@ -20,14 +20,13 @@ payload destined for that node. The following is an example of a 3 hop onion:
 [
 	{
 		"pubkey": "022d223620a359a47ff7f7ac447c85c46c923da53389221a0054c11c1e3ca31d59",
-		"payload": "00000067000001000100000000000003e90000007b000000000000000000000000000000000000000000000000"
+		"payload": "11020203e904017b06080000670000010001"
 	}, {
 		"pubkey": "035d2b1192dfba134e10e540875d366ebc8bc353d5aa766b80c090b39c3a5d885d",
-		"payload": "00000067000003000100000000000003e800000075000000000000000000000000000000000000000000000000"
+		"payload": "11020203e804017506080000670000030001"
 	}, {
-		"style": "legacy",
 		"pubkey": "0382ce59ebf18be7d84677c2e35f23294b9992ceca95491fcf8a56c6cb2d9de199",
-		"payload": "00000067000003000100000000000003e800000075000000000000000000000000000000000000000000000000"
+		"payload": "07020203e8040175"
 	}
 ]
 ```
@@ -45,7 +44,6 @@ which the above *hops* parameter was generated:
 		"msatoshi": 1002,
 		"amount_msat": "1002msat",
 		"delay": 21,
-		"style": "legacy"
 	}, {
 		"id": "035d2b1192dfba134e10e540875d366ebc8bc353d5aa766b80c090b39c3a5d885d",
 		"channel": "103x1x1",
@@ -53,7 +51,6 @@ which the above *hops* parameter was generated:
 		"msatoshi": 1001,
 		"amount_msat": "1001msat",
 		"delay": 15,
-		"style": "legacy"
 	}, {
 		"id": "0382ce59ebf18be7d84677c2e35f23294b9992ceca95491fcf8a56c6cb2d9de199",
 		"channel": "103x3x1",
@@ -61,19 +58,18 @@ which the above *hops* parameter was generated:
 		"msatoshi": 1000,
 		"amount_msat": "1000msat",
 		"delay": 9,
-		"style": "legacy"
 	}
 ]
 ```
 
- - Notice that the payload in the *hops* parameter is the hex-encoded version
-   of the parameters in the `getroute` response.
+ - Notice that the payload in the *hops* parameter is the hex-encoded TLV
+   of the parameters in the `getroute` response, with length prepended as a `bigsize_t`.
  - Except for the pubkey, the values are shifted left by one, i.e., the 1st
    payload in `createonion` corresponds to the 2nd set of values from `getroute`.
  - The final payload is a copy of the last payload sans `channel`
 
 These rules are directly derived from the onion construction. Please refer
-[BOLT 04][bolt04] for details and rationale.
+[BOLT 04](https://github.com/lightning/bolts/blob/master/04-onion-routing.md) for details and rationale.
 
 The *assocdata* parameter specifies the associated data that the onion should
 commit to. If the onion is to be used to send a payment later it MUST match
@@ -94,8 +90,9 @@ RETURN VALUE
 
 [comment]: # (GENERATE-FROM-SCHEMA-START)
 On success, an object is returned, containing:
+
 - **onion** (hex): the onion packet (*onion_size* bytes)
-- **shared_secrets** (array of hexs): one shared secret for each node in the *hops* parameter:
+- **shared\_secrets** (array of secrets): one shared secret for each node in the *hops* parameter:
   - the shared secret with this hop (always 64 characters)
 
 [comment]: # (GENERATE-FROM-SCHEMA-END)
@@ -135,5 +132,4 @@ RESOURCES
 
 Main web site: <https://github.com/ElementsProject/lightning>
 
-[bolt04]: https://github.com/lightningnetwork/lightning-rfc/blob/master/04-onion-routing.md
-[comment]: # ( SHA256STAMP:23e999fedfde74a200c0e6626fa828548b3b60952de30c5885cd63b1922f4508)
+[comment]: # ( SHA256STAMP:c8bd0abd35904cb009b95a7d345be4cc254cff2a427dcf04679a64a6e62dce1e)

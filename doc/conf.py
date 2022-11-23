@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
-# c-lightning documentation build configuration file, created by
+# core-lightning documentation build configuration file, created by
 # sphinx-quickstart on Thu Feb  1 00:24:47 2018.
 #
 # This file is execfile()d with the current directory set to its
@@ -58,8 +58,8 @@ source_suffix = ['.rst', '.md']
 master_doc = 'index'
 
 # General information about the project.
-project = 'c-lightning'
-author = 'c-lightning Developers'
+project = 'core-lightning'
+author = 'Core Lightning Developers'
 copyright = datetime.now().strftime('2015 — %Y, {}'.format(author))
 
 # The version info for the project you're documenting, acts as replacement for
@@ -143,7 +143,7 @@ html_theme = 'sphinx_rtd_theme'
 # The name for this set of Sphinx documents.
 # "<project> v<release> documentation" by default.
 #
-html_title = 'c-lightning ' + version
+html_title = 'Core Lightning ' + version
 
 # A shorter title for the navigation bar.  Default is the same as html_title.
 #
@@ -243,4 +243,4 @@ html_show_sourcelink = False
 # html_search_scorer = 'scorer.js'
 
 # Output file base name for HTML help builder.
-htmlhelp_basename = 'c-lightningdoc'
+htmlhelp_basename = 'core-lightningdoc'

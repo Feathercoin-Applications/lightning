@@ -6,9 +6,10 @@
 
 struct peer_fd;
 
-void peer_start_dualopend(struct peer *peer, struct peer_fd *peer_fd);
+bool peer_start_dualopend(struct peer *peer, struct peer_fd *peer_fd,
+			  struct channel *channel);
 
-void peer_restart_dualopend(struct peer *peer,
+bool peer_restart_dualopend(struct peer *peer,
 			    struct peer_fd *peer_fd,
 			    struct channel *channel);
 

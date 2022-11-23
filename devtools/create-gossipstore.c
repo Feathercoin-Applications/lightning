@@ -64,12 +64,12 @@ static u32 get_update_timestamp(const u8 *msg, struct short_channel_id *scid)
 	u8 u8_ignore;
 	u16 u16_ignore;
 	u32 u32_ignore;
-	struct amount_msat msat;
+	struct amount_msat msat_ignore;
 
 	if (fromwire_channel_update(msg, &sig, &chain_hash, scid,
 				    &timestamp, &u8_ignore, &u8_ignore,
-				    &u16_ignore, &msat, &u32_ignore,
-				    &u32_ignore))
+				    &u16_ignore, &msat_ignore, &u32_ignore,
+				    &u32_ignore, &msat_ignore))
 		return timestamp;
 	errx(1, "Invalid channel_update");
 }
@@ -83,10 +83,9 @@ static u32 get_node_announce_timestamp(const u8 *msg)
 	u8 *features, *addresses;
 	struct tlv_node_ann_tlvs *na_tlvs;
 
-	na_tlvs = tlv_node_ann_tlvs_new(tmpctx);
 	if (fromwire_node_announcement(tmpctx, msg, &sig, &features, &timestamp,
 				       &id, rgb_color, alias, &addresses,
-				       na_tlvs))
+				       &na_tlvs))
 		return timestamp;
 
 	errx(1, "Invalid node_announcement");
@@ -156,7 +155,7 @@ int main(int argc, char *argv[])
 	} else
 		outfd = STDOUT_FILENO;
 
-	version = GOSSIP_STORE_VERSION;
+	version = ((0 << 5) | 10);
 	if (!write_all(outfd, &version, sizeof(version)))
 		err(1, "Writing version");
 

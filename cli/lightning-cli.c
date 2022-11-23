@@ -276,7 +276,7 @@ static bool is_literal(const char *arg)
 	if (arglen == 0) {
 		return false;
 	}
-	return strspn(arg, "0123456789") == arglen
+	return strspn(arg, "0123456789.") == arglen
 		|| streq(arg, "true")
 		|| streq(arg, "false")
 		|| streq(arg, "null")
@@ -562,9 +562,15 @@ static bool handle_notify(const char *buf, jsmntok_t *toks,
 
 static void enable_notifications(int fd)
 {
-	const char *enable = "{ \"jsonrpc\": \"2.0\", \"method\": \"notifications\", \"id\": 0, \"params\": { \"enable\": true } }";
+	const char *enable;
 	char rbuf[100];
 
+	enable = tal_fmt(tmpctx,
+			 "{\"jsonrpc\":\"2.0\","
+			 "\"method\":\"notifications\","
+			 "\"id\":\"cli:notifications#%i\","
+			 "\"params\":{\"enable\":true}}",
+			 getpid());
 	if (!write_all(fd, enable, strlen(enable)))
 		err(ERROR_TALKING_TO_LIGHTNINGD, "Writing enable command");
 
@@ -572,7 +578,7 @@ static void enable_notifications(int fd)
 	memset(rbuf, 0, sizeof(rbuf));
 	while (!strends(rbuf, "\n\n")) {
 		size_t len = strlen(rbuf);
-		if (cli_read(fd, rbuf + len, sizeof(rbuf) - len) < 0)
+		if (cli_read(fd, rbuf + len, sizeof(rbuf) - len) <= 0)
 			err(ERROR_TALKING_TO_LIGHTNINGD,
 			    "Reading enable response");
 	}
@@ -599,7 +605,7 @@ int main(int argc, char *argv[])
 {
 	setup_locale();
 
-	int fd, i;
+	int fd;
 	size_t off;
 	const char *method;
 	char *cmd, *resp, *idstr;
@@ -614,7 +620,7 @@ int main(int argc, char *argv[])
 	enum input input = DEFAULT_INPUT;
 	enum log_level notification_level = LOG_INFORM;
 	bool last_was_progress = false;
-	char *command = NULL;
+	char *command = NULL, *filter = NULL;
 
 	err_set_progname(argv[0]);
 	jsmn_init(&parser);
@@ -644,6 +650,9 @@ int main(int argc, char *argv[])
 	opt_register_arg("-N|--notifications", opt_set_level,
 			 opt_show_level, &notification_level,
 			 "Set notification level, or none");
+	opt_register_arg("-l|--filter", opt_set_charp,
+			 opt_show_charp, &filter,
+			 "Set JSON reply filter");
 
 	opt_register_version();
 
@@ -696,14 +705,22 @@ int main(int argc, char *argv[])
 		err(ERROR_TALKING_TO_LIGHTNINGD,
 		    "Connecting to '%s'", rpc_filename);
 
-	idstr = tal_fmt(ctx, "lightning-cli-%i", getpid());
+	/* We use weird methodnames in test_misc.py::test_cli(), and then
+	 * complain the cln mangles it.  So omit method in that case */
+	if (json_escape_needed(method, strlen(method)))
+		idstr = tal_fmt(ctx, "cli:weirdmethod!#%i", getpid());
+	else
+		idstr = tal_fmt(ctx, "cli:%s#%i", method, getpid());
 
 	if (notification_level <= LOG_LEVEL_MAX)
 		enable_notifications(fd);
 
 	cmd = tal_fmt(ctx,
-		      "{ \"jsonrpc\" : \"2.0\", \"method\" : \"%s\", \"id\" : \"%s\", \"params\" :",
+		      "{ \"jsonrpc\" : \"2.0\", \"method\" : \"%s\", \"id\" : \"%s\",",
 		      json_escape(ctx, method)->s, idstr);
+	if (filter)
+		tal_append_fmt(&cmd, "\"filter\": %s,", filter);
+	tal_append_fmt(&cmd, " \"params\" :");
 
 	if (input == DEFAULT_INPUT) {
 		/* Hacky autodetect; only matters if more than single arg */
@@ -715,7 +732,7 @@ int main(int argc, char *argv[])
 
 	if (input == KEYWORDS) {
 		tal_append_fmt(&cmd, "{ ");
-		for (i = 2; i < argc; i++) {
+		for (size_t i = 2; i < argc; i++) {
 			const char *eq = strchr(argv[i], '=');
 
 			if (!eq)
@@ -730,7 +747,7 @@ int main(int argc, char *argv[])
 		tal_append_fmt(&cmd, "} }");
 	} else {
 		tal_append_fmt(&cmd, "[ ");
-		for (i = 2; i < argc; i++)
+		for (size_t i = 2; i < argc; i++)
 			add_input(&cmd, argv[i], i, argc);
 		tal_append_fmt(&cmd, "] }");
 	}

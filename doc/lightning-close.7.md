@@ -25,8 +25,8 @@ If *unilateraltimeout* is zero, then the **close** command will wait
 indefinitely until the peer is online and can negotiate a mutual close.
 The default is 2 days (172800 seconds).
 
-The *destination* can be of any Bitcoin accepted type, including bech32.
-If it isn't specified, the default is a c-lightning wallet address.  If
+The *destination* can be of any Bitcoin bech32 type.
+If it isn't specified, the default is a Core Lightning wallet address.  If
 the peer hasn't offered the `option_shutdown_anysegwit` feature, then
 taproot addresses (or other v1+ segwit) are not allowed.  Tell your
 friends to upgrade!
@@ -50,7 +50,7 @@ we quickly accept the peer's proposal.
  
 The default is "50%".
 
-*wrong_funding_txid* can only be specified if both sides have offered
+*wrong_funding* can only be specified if both sides have offered
 the "shutdown_wrong_funding" feature (enabled by the
 **experimental-shutdown-wrong-funding** option): it must be a
 transaction id followed by a colon then the output number.  Instead of
@@ -104,9 +104,11 @@ RETURN VALUE
 
 [comment]: # (GENERATE-FROM-SCHEMA-START)
 On success, an object is returned, containing:
+
 - **type** (string): Whether we successfully negotiated a mutual close, closed without them, or discarded not-yet-opened channel (one of "mutual", "unilateral", "unopened")
 
 If **type** is "mutual" or "unilateral":
+
   - **tx** (hex): the raw bitcoin transaction used to close the channel (if it was open)
   - **txid** (txid): the transaction id of the *tx* field
 
@@ -133,4 +135,4 @@ RESOURCES
 
 Main web site: <https://github.com/ElementsProject/lightning>
 
-[comment]: # ( SHA256STAMP:3540adff8d75123f90598a2c0657924c0d5a53aa26716980f9a59879fcfb1f6b)
+[comment]: # ( SHA256STAMP:6a438338ae697732f0100f9e1566b9b8d189778cdb05681305e060487d68663e)

@@ -33,6 +33,7 @@ RUN apt-get -qq update && \
 	python-pkg-resources \
 	shellcheck \
 	libxml2-utils \
+	lowdown \
 	wget \
 	gettext \
 	xsltproc \
@@ -56,7 +57,6 @@ RUN pip3 install --upgrade pip && \
 	Flask==1.0.2 \
 	cheroot==8.2.1 \
 	ephemeral-port-reserve==1.1.0 \
-	flaky==3.4.0 \
 	pytest-benchmark==3.1.1 \
         pytest-forked==0.2 \
 	pytest-timeout==1.3.3 \
@@ -66,5 +66,4 @@ RUN pip3 install --upgrade pip && \
 	tqdm==4.26.0 \
 	pytest-test-groups==1.0.3 \
 	flake8==3.5.0 \
-	pytest-rerunfailures==3.1 \
-	mrkd==0.1.6
+	pytest-rerunfailures==3.1

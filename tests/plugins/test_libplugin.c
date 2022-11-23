@@ -1,7 +1,8 @@
 #include "config.h"
 #include <ccan/array_size/array_size.h>
 #include <ccan/tal/str/str.h>
-#include <common/json_tok.h>
+#include <common/json_param.h>
+#include <common/json_stream.h>
 #include <common/memleak.h>
 #include <plugins/libplugin.h>
 
@@ -106,7 +107,7 @@ static struct command_result *json_testrpc(struct command *cmd,
 static void memleak_mark(struct plugin *p, struct htable *memtable)
 {
 	/* name_option is not a leak! */
-	memleak_remove_region(memtable, &name_option, sizeof(name_option));
+	memleak_ptr(memtable, name_option);
 }
 #endif /* DEVELOPER */
 

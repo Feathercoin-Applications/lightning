@@ -33,14 +33,16 @@ struct short_channel_id *decode_short_ids(const tal_t *ctx, const u8 *encoded)
 	 * The receiver:
 	 *   - if the first byte of `encoded_short_ids` is not a known encoding
 	 *     type:
-	 *     - MAY fail the connection
+	 *     - MAY send a `warning`.
+	 *     - MAY close the connection.
 	 *   - if `encoded_short_ids` does not decode into a whole number of
 	 *     `short_channel_id`:
-	 *     - MAY fail the connection
+	 *     - MAY send a `warning`.
+	 *     - MAY close the connection.
 	 */
 	type = fromwire_u8(&encoded, &max);
 	switch (type) {
-	case ARR_ZLIB:
+	case ARR_ZLIB_DEPRECATED:
 		encoded = unzlib(tmpctx, encoded, max);
 		if (!encoded)
 			return NULL;
@@ -75,13 +77,15 @@ bigsize_t *decode_scid_query_flags(const tal_t *ctx,
 	 *...
 	 *  - if the incoming message includes `query_short_channel_ids_tlvs`:
 	 *    - if `encoding_type` is not a known encoding type:
-	 *      - MAY fail the connection
+	 *      - MAY send a `warning`.
+	 *      - MAY close the connection.
 	 *    - if `encoded_query_flags` does not decode to exactly one flag per
 	 *      `short_channel_id`:
-	 *      - MAY fail the connection.
+	 *      - MAY send a `warning`.
+	 *      - MAY close the connection.
 	 */
 	switch (qf->encoding_type) {
-	case ARR_ZLIB:
+	case ARR_ZLIB_DEPRECATED:
 		encoded = unzlib(tmpctx, encoded, max);
 		if (!encoded)
 			return NULL;
@@ -115,7 +119,7 @@ decode_channel_update_timestamps(const tal_t *ctx,
 	/* FIXME: BOLT #7 should have a requirements like it does for
 	 * query_short_channel_ids_tlvs! */
 	switch (timestamps_tlv->encoding_type) {
-	case ARR_ZLIB:
+	case ARR_ZLIB_DEPRECATED:
 		encoded = unzlib(tmpctx, encoded, max);
 		if (!encoded)
 			return NULL;

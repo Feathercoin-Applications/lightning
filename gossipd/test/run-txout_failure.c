@@ -30,12 +30,9 @@ bool cupdate_different(struct gossip_store *gs UNNEEDED,
 		       const struct half_chan *hc UNNEEDED,
 		       const u8 *cupdate UNNEEDED)
 { fprintf(stderr, "cupdate_different called!\n"); abort(); }
-/* Generated stub for ecdh */
-void ecdh(const struct pubkey *point UNNEEDED, struct secret *ss UNNEEDED)
-{ fprintf(stderr, "ecdh called!\n"); abort(); }
 /* Generated stub for gossip_store_add */
 u64 gossip_store_add(struct gossip_store *gs UNNEEDED, const u8 *gossip_msg UNNEEDED,
-		     u32 timestamp UNNEEDED, bool push UNNEEDED, const u8 *addendum UNNEEDED)
+		     u32 timestamp UNNEEDED, bool push UNNEEDED, bool spam UNNEEDED, const u8 *addendum UNNEEDED)
 { fprintf(stderr, "gossip_store_add called!\n"); abort(); }
 /* Generated stub for gossip_store_add_private_update */
 u64 gossip_store_add_private_update(struct gossip_store *gs UNNEEDED, const u8 *update UNNEEDED)
@@ -59,40 +56,21 @@ const u8 *gossip_store_get_private_update(const tal_t *ctx UNNEEDED,
 void gossip_store_mark_channel_deleted(struct gossip_store *gs UNNEEDED,
 				       const struct short_channel_id *scid UNNEEDED)
 { fprintf(stderr, "gossip_store_mark_channel_deleted called!\n"); abort(); }
-/* Generated stub for json_add_member */
-void json_add_member(struct json_stream *js UNNEEDED,
-		     const char *fieldname UNNEEDED,
-		     bool quote UNNEEDED,
-		     const char *fmt UNNEEDED, ...)
-{ fprintf(stderr, "json_add_member called!\n"); abort(); }
-/* Generated stub for json_member_direct */
-char *json_member_direct(struct json_stream *js UNNEEDED,
-			 const char *fieldname UNNEEDED, size_t extra UNNEEDED)
-{ fprintf(stderr, "json_member_direct called!\n"); abort(); }
-/* Generated stub for json_object_end */
-void json_object_end(struct json_stream *js UNNEEDED)
-{ fprintf(stderr, "json_object_end called!\n"); abort(); }
-/* Generated stub for json_object_start */
-void json_object_start(struct json_stream *ks UNNEEDED, const char *fieldname UNNEEDED)
-{ fprintf(stderr, "json_object_start called!\n"); abort(); }
 /* Generated stub for memleak_add_helper_ */
 void memleak_add_helper_(const tal_t *p UNNEEDED, void (*cb)(struct htable *memtable UNNEEDED,
 						    const tal_t *)){ }
-/* Generated stub for memleak_remove_htable */
-void memleak_remove_htable(struct htable *memtable UNNEEDED, const struct htable *ht UNNEEDED)
-{ fprintf(stderr, "memleak_remove_htable called!\n"); abort(); }
-/* Generated stub for memleak_remove_intmap_ */
-void memleak_remove_intmap_(struct htable *memtable UNNEEDED, const struct intmap *m UNNEEDED)
-{ fprintf(stderr, "memleak_remove_intmap_ called!\n"); abort(); }
+/* Generated stub for memleak_scan_htable */
+void memleak_scan_htable(struct htable *memtable UNNEEDED, const struct htable *ht UNNEEDED)
+{ fprintf(stderr, "memleak_scan_htable called!\n"); abort(); }
+/* Generated stub for memleak_scan_intmap_ */
+void memleak_scan_intmap_(struct htable *memtable UNNEEDED, const struct intmap *m UNNEEDED)
+{ fprintf(stderr, "memleak_scan_intmap_ called!\n"); abort(); }
 /* Generated stub for nannounce_different */
 bool nannounce_different(struct gossip_store *gs UNNEEDED,
 			 const struct node *node UNNEEDED,
 			 const u8 *nannounce UNNEEDED,
 			 bool *only_missing_tlv UNNEEDED)
 { fprintf(stderr, "nannounce_different called!\n"); abort(); }
-/* Generated stub for new_onionreply */
-struct onionreply *new_onionreply(const tal_t *ctx UNNEEDED, const u8 *contents TAKES UNNEEDED)
-{ fprintf(stderr, "new_onionreply called!\n"); abort(); }
 /* Generated stub for notleak_ */
 void *notleak_(void *ptr UNNEEDED, bool plus_children UNNEEDED)
 { fprintf(stderr, "notleak_ called!\n"); abort(); }

@@ -4,14 +4,12 @@
 #include <bitcoin/script.h>
 #include <ccan/cast/cast.h>
 #include <ccan/mem/mem.h>
+#include <common/configdir.h>
 #include <common/json_command.h>
-#include <common/json_helpers.h>
-#include <common/json_tok.h>
+#include <common/json_param.h>
 #include <common/key_derive.h>
-#include <common/param.h>
 #include <common/type_to_string.h>
 #include <lightningd/chaintopology.h>
-#include <lightningd/json.h>
 #include <lightningd/jsonrpc.h>
 #include <lightningd/lightningd.h>
 #include <wallet/txfilter.h>
@@ -337,7 +335,7 @@ static struct command_result *finish_psbt(struct command *cmd,
 {
 	struct json_stream *response;
 	struct wally_psbt *psbt;
-	size_t change_outnum;
+	size_t change_outnum COMPILER_WANTS_INIT("gcc 9.4.0 -Og");
 	u32 current_height = get_block_height(cmd->ld->topology);
 
 	/* Setting the locktime to the next block to be mined has multiple
@@ -412,7 +410,7 @@ fee_calc:
 	json_add_psbt(response, "psbt", psbt);
 	json_add_num(response, "feerate_per_kw", feerate_per_kw);
 	json_add_num(response, "estimated_final_weight", weight);
-	json_add_amount_sat_only(response, "excess_msat", excess);
+	json_add_amount_sat_msat(response, "excess_msat", excess);
 	if (excess_as_change)
 		json_add_num(response, "change_outnum", change_outnum);
 	if (reserve)
@@ -444,14 +442,16 @@ static struct command_result *param_reserve_num(struct command *cmd,
 {
 	bool flag;
 
-	/* "reserve=true" means 6 hours */
-	if (json_to_bool(buffer, tok, &flag)) {
-		*num = tal(cmd, unsigned int);
-		if (flag)
-			**num = RESERVATION_DEFAULT;
-		else
-			**num = 0;
-		return NULL;
+	if (deprecated_apis) {
+		/* "reserve=true" means 6 hours */
+		if (json_to_bool(buffer, tok, &flag)) {
+			*num = tal(cmd, unsigned int);
+			if (flag)
+				**num = RESERVATION_DEFAULT;
+			else
+				**num = 0;
+			return NULL;
+		}
 	}
 
 	return param_number(cmd, name, buffer, tok, num);

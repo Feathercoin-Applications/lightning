@@ -1,8 +1,11 @@
 #include "config.h"
+#include <bitcoin/preimage.h>
 #include <ccan/array_size/array_size.h>
 #include <ccan/asort/asort.h>
+#include <ccan/cast/cast.h>
 #include <ccan/tal/str/str.h>
-#include <common/json_tok.h>
+#include <common/json_param.h>
+#include <common/json_stream.h>
 #include <common/memleak.h>
 #include <common/type_to_string.h>
 #include <plugins/libplugin-pay.h>
@@ -46,9 +49,7 @@ static struct keysend_data *keysend_init(struct payment *p)
 		randombytes_buf(&d->preimage, sizeof(d->preimage));
 		ccan_sha256(&payment_hash, &d->preimage, sizeof(d->preimage));
 		p->payment_hash = tal_dup(p, struct sha256, &payment_hash);
-#if EXPERIMENTAL_FEATURES
 		d->extra_tlvs = NULL;
-#endif
 		return d;
 	} else {
 		/* If we are a child payment (retry or split) we copy the
@@ -63,14 +64,7 @@ static void keysend_cb(struct keysend_data *d, struct payment *p) {
 	size_t hopcount;
 
 	/* On the root payment we perform the featurebit check. */
-	if (p->parent == NULL && p->step == PAYMENT_STEP_INITIALIZED) {
-		if (!payment_root(p)->destination_has_tlv)
-			return payment_fail(
-			    p,
-			    "Recipient %s does not support keysend payments "
-			    "(no TLV support)",
-			    node_id_to_hexstr(tmpctx, p->destination));
-	} else if (p->step == PAYMENT_STEP_FAILED) {
+	if (p->step == PAYMENT_STEP_FAILED) {
 		/* Now we can look at the error, and the failing node,
 		   and determine whether they didn't like our
 		   attempt. This is required since most nodes don't
@@ -96,7 +90,6 @@ static void keysend_cb(struct keysend_data *d, struct payment *p) {
 	tlvstream_set_raw(&last_payload->tlv_payload->fields, PREIMAGE_TLV_TYPE,
 			  &d->preimage, sizeof(struct preimage));
 
-#if EXPERIMENTAL_FEATURES
 	if (d->extra_tlvs != NULL) {
 		for (size_t i = 0; i < tal_count(d->extra_tlvs); i++) {
 			struct tlv_field *f = &d->extra_tlvs[i];
@@ -104,7 +97,6 @@ static void keysend_cb(struct keysend_data *d, struct payment *p) {
 					  f->numtype, f->value, f->length);
 		}
 	}
-#endif
 
 	return payment_continue(p);
 }
@@ -152,16 +144,14 @@ static struct command_result *json_keysend(struct command *cmd, const char *buf,
 	u32 *maxdelay;
 	unsigned int *retryfor;
 	struct route_info **hints;
-#if EXPERIMENTAL_FEATURES
 	struct tlv_field *extra_fields;
-#endif
 
 #if DEVELOPER
 	bool *use_shadow;
 #endif
 	if (!param(cmd, buf, params,
 		   p_req("destination", param_node_id, &destination),
-		   p_req("msatoshi", param_msat, &msat),
+		   p_req("amount_msat|msatoshi", param_msat, &msat),
 		   p_opt("label", param_string, &label),
 		   p_opt_def("maxfeepercent", param_millionths,
 			     &maxfee_pct_millionths, 500000),
@@ -169,12 +159,10 @@ static struct command_result *json_keysend(struct command *cmd, const char *buf,
 		   p_opt_def("maxdelay", param_number, &maxdelay,
 			     maxdelay_default),
 		   p_opt_def("exemptfee", param_msat, &exemptfee, AMOUNT_MSAT(5000)),
+		   p_opt("extratlvs", param_extra_tlvs, &extra_fields),
+		   p_opt("routehints", param_routehint_array, &hints),
 #if DEVELOPER
 		   p_opt_def("use_shadow", param_bool, &use_shadow, true),
-#endif
-		   p_opt("routehints", param_routehint_array, &hints),
-#if EXPERIMENTAL_FEATURES
-		   p_opt("extratlvs", param_extra_tlvs, &extra_fields),
 #endif
 		   NULL))
 		return command_param_failed();
@@ -184,14 +172,18 @@ static struct command_result *json_keysend(struct command *cmd, const char *buf,
 	p->json_buffer = tal_dup_talarr(p, const char, buf);
 	p->json_toks = params;
 	p->destination = tal_steal(p, destination);
-	p->destination_has_tlv = true;
 	p->payment_secret = NULL;
+	p->payment_metadata = NULL;
+	p->blindedpath = NULL;
+	p->blindedpay = NULL;
 	p->amount = *msat;
 	p->routes = tal_steal(p, hints);
 	// 22 is the Rust-Lightning default and the highest minimum we know of.
 	p->min_final_cltv_expiry = 22;
 	p->features = NULL;
 	p->invstring = NULL;
+	/* Don't try to use invstring to hand to sendonion! */
+	p->invstring_used = true;
 	p->why = "Initial attempt";
 	p->constraints.cltv_budget = *maxdelay;
 	p->deadline = timeabs_add(time_now(), time_from_sec(*retryfor));
@@ -212,10 +204,8 @@ static struct command_result *json_keysend(struct command *cmd, const char *buf,
 
 	p->constraints.cltv_budget = *maxdelay;
 
-#if EXPERIMENTAL_FEATURES
 	payment_mod_keysend_get_data(p)->extra_tlvs =
 	    tal_steal(p, extra_fields);
-#endif
 
 	payment_mod_exemptfee_get_data(p)->amount = *exemptfee;
 #if DEVELOPER
@@ -260,7 +250,7 @@ struct keysend_in {
 	struct preimage payment_preimage;
 	char *label;
 	struct tlv_tlv_payload *payload;
-	struct tlv_field *preimage_field;
+	struct tlv_field *preimage_field, *desc_field;
 };
 
 static int tlvfield_cmp(const struct tlv_field *a,
@@ -279,11 +269,27 @@ htlc_accepted_invoice_created(struct command *cmd, const char *buf,
 			      struct keysend_in *ki)
 {
 	struct tlv_field field;
-	int preimage_field_idx = ki->preimage_field - ki->payload->fields;
 
-	/* Remove the preimage field so `lightningd` knows how to handle
-	 * this. */
-	tal_arr_remove(&ki->payload->fields, preimage_field_idx);
+	/* Remove all unknown fields: complain about unused even ones!
+	 * (Keysend is not a design, it's a kludge by people who
+	 * didn't read the spec, and Just Made Something Work). */
+	for (size_t i = 0; i < tal_count(ki->payload->fields); i++) {
+		/* Odd fields are fine, leave them. */
+		if (ki->payload->fields[i].numtype % 2)
+			continue;
+		/* Same with known fields */
+		if (ki->payload->fields[i].meta)
+			continue;
+		/* Complain about it, at least. */
+		if (ki->preimage_field != &ki->payload->fields[i]) {
+			plugin_log(cmd->plugin, LOG_INFORM,
+				   "Keysend payment uses illegal even field %"
+				   PRIu64 ": stripping",
+				   ki->payload->fields[i].numtype);
+		}
+		tal_arr_remove(&ki->payload->fields, i);
+		i--;
+	}
 
 	/* Now we can fill in the payment secret, from invoice. */
 	ki->payload->payment_data = tal(ki->payload,
@@ -343,13 +349,15 @@ static struct command_result *htlc_accepted_call(struct command *cmd,
 	struct sha256 payment_hash;
 	size_t max;
 	struct tlv_tlv_payload *payload;
-	struct tlv_field *preimage_field = NULL, *unknown_field = NULL;
+	struct tlv_field *preimage_field = NULL, *desc_field = NULL;
 	bigsize_t s;
-	struct tlv_field *field;
 	struct keysend_in *ki;
 	struct out_req *req;
 	struct timeabs now = time_now();
 	const char *err;
+	u64 *allowed;
+	size_t err_off;
+	u64 err_type;
 
 	err = json_scan(tmpctx, buf, params,
 			"{onion:{payload:%},htlc:{payment_hash:%}}",
@@ -359,51 +367,45 @@ static struct command_result *htlc_accepted_call(struct command *cmd,
 		return htlc_accepted_continue(cmd, NULL);
 
 	max = tal_bytelen(rawpayload);
-	payload = tlv_tlv_payload_new(cmd);
 
 	s = fromwire_bigsize(&rawpayload, &max);
 	if (s != max) {
 		return htlc_accepted_continue(cmd, NULL);
 	}
-	if (!fromwire_tlv_payload(&rawpayload, &max, payload)) {
+
+	/* Note: This is a magic pointer value, not an actual array */
+	allowed = cast_const(u64 *, FROMWIRE_TLV_ANY_TYPE);
+
+	payload = tlv_tlv_payload_new(cmd);
+	if (!fromwire_tlv(&rawpayload, &max, tlvs_tlv_tlv_payload, TLVS_ARRAY_SIZE_tlv_tlv_payload,
+			  payload, &payload->fields, allowed, &err_off, &err_type)) {
 		plugin_log(
-		    cmd->plugin, LOG_UNUSUAL, "Malformed TLV payload %.*s",
+		    cmd->plugin, LOG_UNUSUAL, "Malformed TLV payload type %"PRIu64" at off %zu %.*s",
+		    err_type, err_off,
 		    json_tok_full_len(params),
 		    json_tok_full(buf, params));
 		return htlc_accepted_continue(cmd, NULL);
 	}
 
 	/* Try looking for the field that contains the preimage */
-	for (int i=0; i<tal_count(payload->fields); i++) {
-		field = &payload->fields[i];
+	for (size_t i = 0; i < tal_count(payload->fields); i++) {
+		struct tlv_field *field = &payload->fields[i];
 		if (field->numtype == PREIMAGE_TLV_TYPE) {
 			preimage_field = field;
-			break;
-		} else if (field->numtype % 2 == 0 && field->meta == NULL) {
-			unknown_field = field;
+			continue;
 		}
+
+		/* Longest (unknown) text field wins. */
+		if (!field->meta
+		    && utf8_check(field->value, field->length)
+		    && (!desc_field || field->length > desc_field->length))
+			desc_field = field;
 	}
 
 	/* If we don't have a preimage field then this is not a keysend, let
 	 * someone else take care of it. */
 	if (preimage_field == NULL)
 		return htlc_accepted_continue(cmd, NULL);
-
-	if (unknown_field != NULL) {
-#if !EXPERIMENTAL_FEATURES
-		plugin_log(cmd->plugin, LOG_UNUSUAL,
-			   "Payload contains unknown even TLV-type %" PRIu64
-			   ", can't safely accept the keysend. Deferring to "
-			   "other plugins.",
-			   unknown_field->numtype);
-		return htlc_accepted_continue(cmd, NULL);
-#else
-		plugin_log(cmd->plugin, LOG_INFORM,
-			   "Experimental: Accepting the keysend payment "
-			   "despite having unknown even TLV type %" PRIu64 ".",
-			   unknown_field->numtype);
-#endif
-	}
 
 	/* If malformed (amt is compulsory), let lightningd handle it. */
 	if (!payload->amt_to_forward) {
@@ -427,6 +429,7 @@ static struct command_result *htlc_accepted_call(struct command *cmd,
 	ki->label = tal_fmt(ki, "keysend-%lu.%09lu", (unsigned long)now.ts.tv_sec, now.ts.tv_nsec);
 	ki->payload = tal_steal(ki, payload);
 	ki->preimage_field = preimage_field;
+	ki->desc_field = desc_field;
 
 	/* If the preimage doesn't hash to the payment_hash we must continue,
 	 * maybe someone else knows how to handle these. */
@@ -457,9 +460,19 @@ static struct command_result *htlc_accepted_call(struct command *cmd,
 				    ki);
 
 	plugin_log(cmd->plugin, LOG_INFORM, "Inserting a new invoice for keysend with payment_hash %s", type_to_string(tmpctx, struct sha256, &payment_hash));
-	json_add_string(req->js, "msatoshi", "any");
+	json_add_string(req->js, "amount_msat", "any");
 	json_add_string(req->js, "label", ki->label);
-	json_add_string(req->js, "description", "Spontaneous incoming payment through keysend");
+	if (desc_field) {
+		const char *desc = tal_fmt(tmpctx, "keysend: %.*s",
+					   (int)desc_field->length,
+					   (const char *)desc_field->value);
+		json_add_string(req->js, "description", desc);
+		/* Don't exceed max possible desc length! */
+		if (strlen(desc) > 1023)
+			json_add_bool(req->js, "deschashonly", true);
+	} else {
+		json_add_string(req->js, "description", "keysend");
+	}
 	json_add_preimage(req->js, "preimage", &ki->payment_preimage);
 
 	return send_outreq(cmd->plugin, req);

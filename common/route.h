@@ -11,11 +11,6 @@ struct gossmap;
 struct gossmap_chan;
 struct gossmap_node;
 
-enum route_hop_style {
-	ROUTE_HOP_LEGACY = 1,
-	ROUTE_HOP_TLV = 2,
-};
-
 /**
  * struct route_hop: a hop in a route.
  *
@@ -24,9 +19,6 @@ enum route_hop_style {
  * @node_id: the node_id of the destination of this hop.
  * @amount: amount to send through this hop.
  * @delay: total cltv delay at this hop.
- * @blinding: blinding key for this hop (if any)
- * @enctlv: encrypted TLV for this hop (if any)
- * @style: onion encoding style for this hop.
  */
 struct route_hop {
 	struct short_channel_id scid;
@@ -34,9 +26,6 @@ struct route_hop {
 	struct node_id node_id;
 	struct amount_msat amount;
 	u32 delay;
-	struct pubkey *blinding;
-	u8 *enctlv;
-	enum route_hop_style style;
 };
 
 /* Can c carry amount in dir? */

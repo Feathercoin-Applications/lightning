@@ -30,13 +30,9 @@ def output(line):
 
 
 def output_type(properties, is_optional):
-    # FIXME: there's a horrible hack for listpeers' closer which can be NULL
-    if type(properties['type']) is list:
-        typename = properties['type'][0]
-    else:
-        typename = properties['type']
+    typename = properties['type'].replace('_', '\\_')
     if typename == 'array':
-        typename += ' of {}s'.format(properties['items']['type'])
+        typename += ' of {}s'.format(properties['items']['type'].replace('_', '\\_'))
     if is_optional:
         typename += ", optional"
     output(" ({})".format(typename))
@@ -69,11 +65,16 @@ def output_range(properties):
             output(' (one of {})'.format(', '.join([json_value(p) for p in properties['enum']])))
 
 
+def fmt_propname(propname):
+    """Pretty-print format a property name"""
+    return '**{}**'.format(propname.replace('_', '\\_'))
+
+
 def output_member(propname, properties, is_optional, indent, print_type=True, prefix=None):
     """Generate description line(s) for this member"""
 
     if prefix is None:
-        prefix = '- **{}**'.format(propname)
+        prefix = '- ' + fmt_propname(propname)
     output(indent + prefix)
 
     # We make them explicitly note if they don't want a type!
@@ -127,6 +128,17 @@ def output_members(sub, indent=''):
 
     # Remove deprecated and stub properties, collect warnings
     # (Stubs required to keep additionalProperties: false happy)
+
+    # FIXME: It fails for schemas which have only an array type with
+    # no properties, ex:
+    # "abcd": {
+    #  "type": "array",
+    #   "items": {
+    #    "type": "whatever",
+    #    "description": "efgh"
+    #   }
+    # }
+    # Checkout the schema of `staticbackup`.
     for p in list(sub['properties'].keys()):
         if len(sub['properties'][p]) == 0 or 'deprecated' in sub['properties'][p]:
             del sub['properties'][p]
@@ -137,13 +149,13 @@ def output_members(sub, indent=''):
     for p in sub['properties']:
         if p.startswith('warning'):
             continue
-        if p in sub['required']:
+        if 'required' in sub and p in sub['required']:
             output_member(p, sub['properties'][p], False, indent)
 
     for p in sub['properties']:
         if p.startswith('warning'):
             continue
-        if p not in sub['required']:
+        if 'required' not in sub or p not in sub['required']:
             output_member(p, sub['properties'][p], True, indent)
 
     if warnings != []:
@@ -168,7 +180,7 @@ def output_members(sub, indent=''):
 
         # "required" are fields that simply must be present
         for r in ifclause['if'].get('required', []):
-            conditions.append('**{}** is present'.format(r))
+            conditions.append(fmt_propname(r) + ' is present')
 
         # "properties" are enums of field values
         for tag, vals in ifclause['if'].get('properties', {}).items():
@@ -176,7 +188,7 @@ def output_members(sub, indent=''):
             assert 'description' not in vals
             whichvalues = vals['enum']
 
-            cond = "**{}** is".format(tag)
+            cond = fmt_propname(tag) + " is"
             if len(whichvalues) == 1:
                 cond += " {}".format(json_value(whichvalues[0]))
             else:
@@ -184,7 +196,7 @@ def output_members(sub, indent=''):
                                            json_value(whichvalues[-1]))
             conditions.append(cond)
 
-        sentence = indent + "If " + ", and ".join(conditions) + ":\n"
+        sentence = indent + "If " + ", and ".join(conditions) + ":\n\n"
 
         if has_members(ifclause['then']):
             # Prefix with blank line.
@@ -218,25 +230,25 @@ def generate_from_schema(schema):
         output('On success, an empty object is returned.\n')
         sub = schema
     elif len(toplevels) == 1 and props[toplevels[0]]['type'] == 'object':
-        output('On success, an object containing **{}** is returned.  It is an object containing:\n'.format(toplevels[0]))
+        output('On success, an object containing {} is returned.  It is an object containing:\n\n'.format(fmt_propname(toplevels[0])))
         # Don't have a description field here, it's not used.
         assert 'description' not in toplevels[0]
         sub = props[toplevels[0]]
     elif len(toplevels) == 1 and props[toplevels[0]]['type'] == 'array':
-        output('On success, an object containing **{}** is returned.  It is an array of objects, where each object contains:\n'.format(toplevels[0]))
+        output('On success, an object containing {} is returned.  It is an array of objects, where each object contains:\n\n'.format(fmt_propname(toplevels[0])))
         # Don't have a description field here, it's not used.
         assert 'description' not in toplevels[0]
         sub = props[toplevels[0]]['items']
     else:
-        output('On success, an object is returned, containing:\n')
+        output('On success, an object is returned, containing:\n\n')
         sub = schema
 
     output_members(sub)
 
     if warnings:
-        outputs(['\n', 'The following warnings may also be returned:\n'])
+        outputs(['\n', 'The following warnings may also be returned:\n\n'])
         for w, desc in warnings:
-            output("- **{}**: {}\n".format(w, desc))
+            output("- {}: {}\n".format(fmt_propname(w), desc))
 
     # GH markdown rendering gets upset if there isn't a blank line
     # between a list and the end comment.

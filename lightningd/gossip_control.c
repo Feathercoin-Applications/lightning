@@ -3,9 +3,8 @@
 #include <ccan/ptrint/ptrint.h>
 #include <channeld/channeld_wiregen.h>
 #include <common/json_command.h>
-#include <common/json_helpers.h>
-#include <common/json_tok.h>
-#include <common/param.h>
+#include <common/json_param.h>
+#include <common/json_stream.h>
 #include <common/type_to_string.h>
 #include <gossipd/gossipd_wiregen.h>
 #include <hsmd/capabilities.h>
@@ -124,11 +123,11 @@ static void handle_local_channel_update(struct lightningd *ld, const u8 *msg)
 
 	/* In theory this could vanish before gossipd gets around to telling
 	 * us. */
-	channel = any_channel_by_scid(ld, &scid);
+	channel = any_channel_by_scid(ld, &scid, true);
 	if (!channel) {
-		log_broken(ld->log, "Local update for bad scid %s",
-			   type_to_string(tmpctx, struct short_channel_id,
-					  &scid));
+		log_unusual(ld->log, "Local update for bad scid %s",
+			    type_to_string(tmpctx, struct short_channel_id,
+					   &scid));
 		return;
 	}
 
@@ -154,10 +153,9 @@ static unsigned gossip_msg(struct subd *gossip, const u8 *msg, const int *fds)
 	/* These are messages we send, not them. */
 	case WIRE_GOSSIPD_INIT:
 	case WIRE_GOSSIPD_GET_TXOUT_REPLY:
-	case WIRE_GOSSIPD_OUTPOINT_SPENT:
+	case WIRE_GOSSIPD_OUTPOINTS_SPENT:
 	case WIRE_GOSSIPD_NEW_LEASE_RATES:
 	case WIRE_GOSSIPD_DEV_SET_MAX_SCIDS_ENCODE_SIZE:
-	case WIRE_GOSSIPD_DEV_SUPPRESS:
 	case WIRE_GOSSIPD_LOCAL_CHANNEL_CLOSE:
 	case WIRE_GOSSIPD_DEV_MEMLEAK:
 	case WIRE_GOSSIPD_DEV_COMPACT_STORE:
@@ -176,7 +174,7 @@ static unsigned gossip_msg(struct subd *gossip, const u8 *msg, const int *fds)
 	case WIRE_GOSSIPD_ADDGOSSIP_REPLY:
 	case WIRE_GOSSIPD_NEW_BLOCKHEIGHT_REPLY:
 	case WIRE_GOSSIPD_GET_ADDRS_REPLY:
-	case WIRE_GOSSIPD_REMOTE_ADDR:
+	case WIRE_GOSSIPD_DISCOVERED_IP:
 		break;
 
 	case WIRE_GOSSIPD_GET_TXOUT:
@@ -230,6 +228,7 @@ static void gossipd_init_done(struct subd *gossipd,
 			      void *unused)
 {
 	/* Break out of loop, so we can begin */
+	log_debug(gossipd->ld->log, "io_break: %s", __func__);
 	io_break(gossipd);
 }
 
@@ -239,6 +238,7 @@ void gossip_init(struct lightningd *ld, int connectd_fd)
 {
 	u8 *msg;
 	int hsmfd;
+	void *ret;
 
 	hsmfd = hsm_get_global_fd(ld, HSM_CAP_ECDH|HSM_CAP_SIGN_GOSSIP);
 
@@ -268,14 +268,20 @@ void gossip_init(struct lightningd *ld, int connectd_fd)
 		 gossipd_init_done, NULL);
 
 	/* Wait for gossipd_init_reply */
-	io_loop(NULL, NULL);
+	ret = io_loop(NULL, NULL);
+	log_debug(ld->log, "io_loop: %s", __func__);
+	assert(ret == ld->gossip);
 }
 
-void gossipd_notify_spend(struct lightningd *ld,
-			  const struct short_channel_id *scid)
+/* We save these so we always tell gossipd about new blockheight first. */
+void gossipd_notify_spends(struct lightningd *ld,
+			   u32 blockheight,
+			   const struct short_channel_id *scids)
 {
-	u8 *msg = towire_gossipd_outpoint_spent(tmpctx, scid);
-	subd_send_msg(ld->gossip, msg);
+	subd_send_msg(ld->gossip,
+		      take(towire_gossipd_outpoints_spent(NULL,
+							  blockheight,
+							  scids)));
 }
 
 /* We unwrap, add the peer id, and send to gossipd. */
@@ -284,7 +290,7 @@ void tell_gossipd_local_channel_update(struct lightningd *ld,
 				       const u8 *msg)
 {
 	struct short_channel_id scid;
-	bool disable;
+	bool disable, public;
 	u16 cltv_expiry_delta;
 	struct amount_msat htlc_minimum_msat;
 	u32 fee_base_msat, fee_proportional_millionths;
@@ -295,7 +301,7 @@ void tell_gossipd_local_channel_update(struct lightningd *ld,
 						    &htlc_minimum_msat,
 						    &fee_base_msat,
 						    &fee_proportional_millionths,
-						    &htlc_maximum_msat)) {
+						    &htlc_maximum_msat, &public)) {
 		channel_internal_error(channel,
 				       "bad channeld_local_channel_update %s",
 				       tal_hex(channel, msg));
@@ -315,7 +321,9 @@ void tell_gossipd_local_channel_update(struct lightningd *ld,
 			    cltv_expiry_delta,
 			    htlc_minimum_msat,
 			    fee_base_msat,
-			    fee_proportional_millionths, htlc_maximum_msat)));
+			    fee_proportional_millionths,
+			    htlc_maximum_msat,
+			    public)));
 }
 
 void tell_gossipd_local_channel_announce(struct lightningd *ld,
@@ -345,16 +353,39 @@ void tell_gossipd_local_private_channel(struct lightningd *ld,
 					struct amount_sat capacity,
 					const u8 *features)
 {
+	/* Which short_channel_id should we use to refer to this channel when
+	 * creating invoices? */
+	const struct short_channel_id *scid;
+
 	/* As we're shutting down, ignore */
 	if (!ld->gossip)
 		return;
 
+	if (channel->scid != NULL) {
+		scid = channel->scid;
+	} else {
+		scid = channel->alias[REMOTE];
+	}
+
+	assert(scid != NULL);
 	subd_send_msg(ld->gossip,
 		      take(towire_gossipd_local_private_channel
 			   (NULL, &channel->peer->id,
 			    capacity,
-			    channel->scid,
+			    scid,
 			    features)));
+
+	/* If we have no real scid, and there are two different
+	 * aliases, then we need to add both as single direction
+	 * channels to the local gossip_store. */
+	if ((!channel->scid && channel->alias[LOCAL]) &&
+	    !short_channel_id_eq(channel->alias[REMOTE],
+				 channel->alias[LOCAL])) {
+		subd_send_msg(ld->gossip,
+			      take(towire_gossipd_local_private_channel(
+				  NULL, &channel->peer->id, capacity,
+				  channel->alias[LOCAL], features)));
+	}
 }
 
 static struct command_result *json_setleaserates(struct command *cmd,
@@ -364,12 +395,11 @@ static struct command_result *json_setleaserates(struct command *cmd,
 {
 	struct json_stream *res;
 	struct lease_rates *rates;
-	struct amount_sat *lease_base_sat;
-	struct amount_msat *channel_fee_base_msat;
+	struct amount_msat *channel_fee_base_msat, *lease_base_msat;
 	u32 *lease_basis, *channel_fee_max_ppt, *funding_weight;
 
 	if (!param(cmd, buffer, params,
-		   p_req("lease_fee_base_msat", param_sat, &lease_base_sat),
+		   p_req("lease_fee_base_msat", param_msat, &lease_base_msat),
 		   p_req("lease_fee_basis", param_number, &lease_basis),
 		   p_req("funding_weight", param_number, &funding_weight),
 		   p_req("channel_fee_max_base_msat", param_msat,
@@ -381,7 +411,7 @@ static struct command_result *json_setleaserates(struct command *cmd,
 
 	rates = tal(tmpctx, struct lease_rates);
 	rates->lease_fee_basis = *lease_basis;
-	rates->lease_fee_base_sat = lease_base_sat->satoshis; /* Raw: conversion */
+	rates->lease_fee_base_sat = lease_base_msat->millisatoshis / 1000; /* Raw: conversion */
 	rates->channel_fee_max_base_msat = channel_fee_base_msat->millisatoshis; /* Raw: conversion */
 
 	rates->funding_weight = *funding_weight;
@@ -389,7 +419,7 @@ static struct command_result *json_setleaserates(struct command *cmd,
 		= *channel_fee_max_ppt;
 
 	/* Gotta check that we didn't overflow */
-	if (lease_base_sat->satoshis > rates->lease_fee_base_sat) /* Raw: comparison */
+	if (lease_base_msat->millisatoshis != rates->lease_fee_base_sat * (u64)1000) /* Raw: comparison */
 		return command_fail_badparam(cmd, "lease_fee_base_msat",
 					     buffer, params, "Overflow");
 
@@ -402,7 +432,7 @@ static struct command_result *json_setleaserates(struct command *cmd,
 		      take(towire_gossipd_new_lease_rates(NULL, rates)));
 
 	res = json_stream_success(cmd);
-	json_add_amount_sat_only(res, "lease_fee_base_msat",
+	json_add_amount_sat_msat(res, "lease_fee_base_msat",
 				 amount_sat(rates->lease_fee_base_sat));
 	json_add_num(res, "lease_fee_basis", rates->lease_fee_basis);
 	json_add_num(res, "funding_weight", rates->funding_weight);
@@ -502,27 +532,6 @@ static const struct json_command dev_set_max_scids_encode_size = {
 	"Set {max} bytes of short_channel_ids per reply_channel_range"
 };
 AUTODATA(json_command, &dev_set_max_scids_encode_size);
-
-static struct command_result *json_dev_suppress_gossip(struct command *cmd,
-						       const char *buffer,
-						       const jsmntok_t *obj UNNEEDED,
-						       const jsmntok_t *params)
-{
-	if (!param(cmd, buffer, params, NULL))
-		return command_param_failed();
-
-	subd_send_msg(cmd->ld->gossip, take(towire_gossipd_dev_suppress(NULL)));
-
-	return command_success(cmd, json_stream_success(cmd));
-}
-
-static const struct json_command dev_suppress_gossip = {
-	"dev-suppress-gossip",
-	"developer",
-	json_dev_suppress_gossip,
-	"Stop this node from sending any more gossip."
-};
-AUTODATA(json_command, &dev_suppress_gossip);
 
 static void dev_compact_gossip_store_reply(struct subd *gossip UNUSED,
 					   const u8 *reply,

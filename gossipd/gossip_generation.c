@@ -20,15 +20,6 @@
 #include <hsmd/hsmd_wiregen.h>
 #include <wire/wire_sync.h>
 
-static bool wireaddr_arr_contains(const struct wireaddr *was,
-				  const struct wireaddr *wa)
-{
-	for (size_t i = 0; i < tal_count(was); i++)
-		if (wireaddr_eq(&was[i], wa))
-			return true;
-	return false;
-}
-
 /* Create a node_announcement with the given signature. It may be NULL in the
  * case we need to create a provisional announcement for the HSM to sign.
  * This is called twice: once with the dummy signature to get it signed and a
@@ -44,22 +35,26 @@ static u8 *create_node_announcement(const tal_t *ctx, struct daemon *daemon,
 	u8 *addresses = tal_arr(tmpctx, u8, 0);
 	u8 *announcement;
 	struct tlv_node_ann_tlvs *na_tlv;
-	size_t i;
+	size_t i, count_announceable;
 
 	/* add all announceable addresses */
+	count_announceable = tal_count(daemon->announceable);
 	was = tal_arr(tmpctx, struct wireaddr, 0);
-	for (i = 0; i < tal_count(daemon->announceable); i++)
+	for (i = 0; i < count_announceable; i++)
 		tal_arr_expand(&was, daemon->announceable[i]);
 
-	/* add reported `remote_addr` v4 and v6 of our self */
-	if (daemon->remote_addr_v4 != NULL &&
-	    !wireaddr_arr_contains(was, daemon->remote_addr_v4))
-		tal_arr_expand(&was, *daemon->remote_addr_v4);
-	if (daemon->remote_addr_v6 != NULL &&
-	    !wireaddr_arr_contains(was, daemon->remote_addr_v6))
-		tal_arr_expand(&was, *daemon->remote_addr_v6);
+	/* Add discovered IPs v4/v6 verified by peer `remote_addr` feature. */
+	/* Only do that if we don't have addresses announced. */
+	if (count_announceable == 0) {
+		if (daemon->discovered_ip_v4 != NULL &&
+		    !wireaddr_arr_contains(was, daemon->discovered_ip_v4))
+			tal_arr_expand(&was, *daemon->discovered_ip_v4);
+		if (daemon->discovered_ip_v6 != NULL &&
+		    !wireaddr_arr_contains(was, daemon->discovered_ip_v6))
+			tal_arr_expand(&was, *daemon->discovered_ip_v6);
+	}
 
-	/* Sort by address type again, as we added dynamic remote_addr v4/v6. */
+	/* Sort by address type again, as we added dynamic discovered_ip v4/v6. */
 	/* BOLT #7:
 	 *
 	 * The origin node:
@@ -335,19 +330,9 @@ send:
 	return true;
 }
 
-/* This retransmits the existing node announcement */
-static void force_self_nannounce_rexmit(struct daemon *daemon)
-{
-	struct node *self = get_node(daemon->rstate, &daemon->id);
-
-	force_node_announce_rexmit(daemon->rstate, self);
-}
-
 static void update_own_node_announcement_after_startup(struct daemon *daemon)
 {
-	/* If that doesn't send one, arrange rexmit anyway */
-	if (!update_own_node_announcement(daemon, false, false))
-		force_self_nannounce_rexmit(daemon);
+	update_own_node_announcement(daemon, false, false);
 }
 
 /* This creates and transmits a *new* node announcement */
@@ -362,15 +347,23 @@ static void force_self_nannounce_regen(struct daemon *daemon)
 	update_own_node_announcement(daemon, false, true);
 }
 
-/* Because node_announcement propagation is spotty, we rexmit this every
+/* Because node_announcement propagation is spotty, we regenerate this every
  * 24 hours. */
 static void setup_force_nannounce_regen_timer(struct daemon *daemon)
 {
+	struct timerel regen_time;
+
+	/* For developers we can force a regen every 24 seconds to test */
+	if (IFDEV(daemon->rstate->dev_fast_gossip_prune, false))
+		regen_time = time_from_sec(24);
+	else
+		regen_time = time_from_sec(24 * 3600);
+
 	tal_free(daemon->node_announce_regen_timer);
 	daemon->node_announce_regen_timer
 		= new_reltimer(&daemon->timers,
 			       daemon,
-			       time_from_sec(24 * 3600),
+			       regen_time,
 			       force_self_nannounce_regen,
 			       daemon);
 }
@@ -386,11 +379,7 @@ void maybe_send_own_node_announce(struct daemon *daemon, bool startup)
 	if (!daemon->rstate->local_channel_announced)
 		return;
 
-	/* If we didn't send one, arrange rexmit of existing at startup */
-	if (!update_own_node_announcement(daemon, startup, false)) {
-		if (startup)
-			force_self_nannounce_rexmit(daemon);
-	}
+	update_own_node_announcement(daemon, startup, false);
 }
 
 /* Fast accessors for channel_update fields */
@@ -524,7 +513,8 @@ static u8 *create_unsigned_update(const tal_t *ctx,
 				  struct amount_msat htlc_minimum,
 				  struct amount_msat htlc_maximum,
 				  u32 fee_base_msat,
-				  u32 fee_proportional_millionths)
+				  u32 fee_proportional_millionths,
+				  bool public)
 {
 	secp256k1_ecdsa_signature dummy_sig;
 	u8 message_flags, channel_flags;
@@ -550,17 +540,20 @@ static u8 *create_unsigned_update(const tal_t *ctx,
 
 	/* BOLT #7:
 	 *
-	 * The `message_flags` bitfield is used to indicate the presence of
-	 * optional fields in the `channel_update` message:
+	 * The `message_flags` bitfield is used to provide additional
+	 * details about the message:
 	 *
-	 *| Bit Position  | Name                      | Field                 |
-	 *...
-	 *| 0             | `option_channel_htlc_max` | `htlc_maximum_msat`   |
+	 * | Bit Position  | Name           |
+	 * | ------------- | ---------------|
+	 * | 0             | `must_be_one`  |
+	 * | 1             | `dont_forward` |
 	 */
-	message_flags = 0 | ROUTING_OPT_HTLC_MAX_MSAT;
+	message_flags = ROUTING_OPT_HTLC_MAX_MSAT;
+	if (!public)
+		message_flags |= ROUTING_OPT_DONT_FORWARD;
 
 	/* We create an update with a dummy signature and timestamp. */
-	return towire_channel_update_option_channel_htlc_max(ctx,
+	return towire_channel_update(ctx,
 				       &dummy_sig, /* sig set later */
 				       &chainparams->genesis_blockhash,
 				       scid,
@@ -741,7 +734,7 @@ void refresh_local_channel(struct daemon *daemon,
 	if (!prev)
 		return;
 
-	if (!fromwire_channel_update_option_channel_htlc_max(prev,
+	if (!fromwire_channel_update(prev,
 				     &signature, &chain_hash,
 				     &short_channel_id, &timestamp,
 				     &message_flags, &channel_flags,
@@ -781,7 +774,8 @@ void refresh_local_channel(struct daemon *daemon,
 					false, cltv_expiry_delta,
 					htlc_minimum, htlc_maximum,
 					fee_base_msat,
-					fee_proportional_millionths);
+					fee_proportional_millionths,
+					!(message_flags & ROUTING_OPT_DONT_FORWARD));
 	sign_timestamp_and_apply_update(daemon, chan, direction, take(update));
 }
 
@@ -798,6 +792,7 @@ void handle_local_channel_update(struct daemon *daemon, const u8 *msg)
 	int direction;
 	u8 *unsigned_update;
 	const struct half_chan *hc;
+	bool public;
 
 	if (!fromwire_gossipd_local_channel_update(msg,
 						   &id,
@@ -807,7 +802,8 @@ void handle_local_channel_update(struct daemon *daemon, const u8 *msg)
 						   &htlc_minimum,
 						   &fee_base_msat,
 						   &fee_proportional_millionths,
-						   &htlc_maximum)) {
+						   &htlc_maximum,
+						   &public)) {
 		master_badmsg(WIRE_GOSSIPD_LOCAL_CHANNEL_UPDATE, msg);
 	}
 
@@ -832,7 +828,8 @@ void handle_local_channel_update(struct daemon *daemon, const u8 *msg)
 						 disable, cltv_expiry_delta,
 						 htlc_minimum, htlc_maximum,
 						 fee_base_msat,
-						 fee_proportional_millionths);
+						 fee_proportional_millionths,
+						 public);
 
 	hc = &chan->half[direction];
 

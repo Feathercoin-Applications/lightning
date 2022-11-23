@@ -1,6 +1,6 @@
 /*~ Welcome, wonderful reader!
  *
- * This is the core of c-lightning: the main file of the master daemon
+ * This is the Core of um, Core Lightning: the main file of the master daemon
  * `lightningd`.  It's mainly cluttered with the miscellany of setup,
  * and a few startup sanity checks.
  *
@@ -125,6 +125,7 @@ static struct lightningd *new_lightningd(const tal_t *ctx)
 	ld->dev_gossip_time = 0;
 	ld->dev_fast_gossip = false;
 	ld->dev_fast_gossip_prune = false;
+	ld->dev_fast_reconnect = false;
 	ld->dev_force_privkey = NULL;
 	ld->dev_force_bip32_seed = NULL;
 	ld->dev_force_channel_secrets = NULL;
@@ -134,8 +135,8 @@ static struct lightningd *new_lightningd(const tal_t *ctx)
 	ld->dev_no_version_checks = false;
 	ld->dev_max_funding_unconfirmed = 2016;
 	ld->dev_ignore_modern_onion = false;
-	ld->dev_ignore_obsolete_onion = false;
 	ld->dev_disable_commit = -1;
+	ld->dev_no_ping_timer = false;
 #endif
 
 	/*~ These are CCAN lists: an embedded double-linked list.  It's not
@@ -183,7 +184,7 @@ static struct lightningd *new_lightningd(const tal_t *ctx)
 	 * allocation function): ld->log will be implicitly freed when ld
 	 * is. */
 	ld->log = new_log(ld, ld->log_book, NULL, "lightningd");
-	ld->logfile = NULL;
+	ld->logfiles = NULL;
 
 	/*~ We explicitly set these to NULL: if they're still NULL after option
 	 * parsing, we know they're to be set to the defaults. */
@@ -194,6 +195,7 @@ static struct lightningd *new_lightningd(const tal_t *ctx)
 	list_head_init(&ld->sendpay_commands);
 	list_head_init(&ld->close_commands);
 	list_head_init(&ld->ping_commands);
+	list_head_init(&ld->disconnect_commands);
 	list_head_init(&ld->waitblockheight_commands);
 
 	/*~ Tal also explicitly supports arrays: it stores the number of
@@ -206,10 +208,13 @@ static struct lightningd *new_lightningd(const tal_t *ctx)
 
 	ld->remote_addr_v4 = NULL;
 	ld->remote_addr_v6 = NULL;
+	ld->discovered_ip_v4 = NULL;
+	ld->discovered_ip_v6 = NULL;
 	ld->listen = true;
 	ld->autolisten = true;
 	ld->reconnect = true;
 	ld->try_reexec = false;
+	ld->db_upgrade_ok = NULL;
 
 	/*~ This is from ccan/timer: it is efficient for the case where timers
 	 * are deleted before expiry (as is common with timeouts) using an
@@ -245,7 +250,7 @@ static struct lightningd *new_lightningd(const tal_t *ctx)
 
 	/*~ We run a number of plugins (subprocesses that we talk JSON-RPC with)
 	 * alongside this process. This allows us to have an easy way for users
-	 * to add their own tools without having to modify the c-lightning source
+	 * to add their own tools without having to modify the Core Lightning source
 	 * code. Here we initialize the context that will keep track and control
 	 * the plugins.
 	 */
@@ -329,7 +334,7 @@ static void destroy_alt_subdaemons(struct lightningd *ld)
 static void memleak_help_alt_subdaemons(struct htable *memtable,
 					struct lightningd *ld)
 {
-	memleak_remove_strmap(memtable, &ld->alt_subdaemons);
+	memleak_scan_strmap(memtable, &ld->alt_subdaemons);
 }
 #endif /* DEVELOPER */
 
@@ -398,10 +403,10 @@ void test_subdaemons(const struct lightningd *ld)
 
 		/*~ ccan/err is a wrapper around BSD's err.h, which defines
 		 * the convenience functions err() (error with message
-		 * followed by a string based on errno) and errx() (same,
+		 * followed by a string based on errno) and errx() (same,x
 		 * but no errno string). */
 		if (pid == -1)
-			err(1, "Could not run %s", dpath);
+			err(EXITCODE_SUBDAEMON_FAIL, "Could not run %s", dpath);
 
 		/*~ CCAN's grab_file module contains a routine to read into a
 		 * tallocated buffer until EOF */
@@ -413,7 +418,7 @@ void test_subdaemons(const struct lightningd *ld)
 		/*~ strstarts is from CCAN/str. */
 		if (!strstarts(verstring, version())
 		    || verstring[strlen(version())] != '\n')
-			errx(1, "%s: bad version '%s'",
+			errx(EXITCODE_SUBDAEMON_FAIL, "%s: bad version '%s'",
 			     subdaemons[i], verstring);
 		/*~ The child will be reaped by sigchld_rfd_in, so we don't
 		 * need to waitpid() here. */
@@ -512,7 +517,7 @@ static const char *find_daemon_dir(struct lightningd *ld, const char *argv0)
  * is an awesome runtime memory usage detector for C and C++ programs). In
  * some ways it would be neater not to do this, but it turns out some
  * transient objects still need cleaning. */
-static void shutdown_subdaemons(struct lightningd *ld)
+static void free_all_channels(struct lightningd *ld)
 {
 	struct peer *p;
 
@@ -525,19 +530,6 @@ static void shutdown_subdaemons(struct lightningd *ld)
 	 * callbacks; in this case, some objects freed here can cause database
 	 * writes, which must be inside a transaction. */
 	db_begin_transaction(ld->wallet->db);
-
-	/* Let everyone shutdown cleanly. */
-	close(ld->hsm_fd);
-	/*~ The three "global" daemons, which we shutdown explicitly: we
-	 * give them 10 seconds to exit gracefully before killing them.  */
-	ld->connectd = subd_shutdown(ld->connectd, 10);
-	ld->gossip = subd_shutdown(ld->gossip, 10);
-	ld->hsm = subd_shutdown(ld->hsm, 10);
-
-	/*~ Closing the hsmd means all other subdaemons should be exiting;
-	 * deal with that cleanly before we start freeing internal
-	 * structures. */
-	subd_shutdown_remaining(ld);
 
 	/* Now we free all the HTLCs */
 	free_htlcs(ld, NULL);
@@ -574,6 +566,18 @@ static void shutdown_subdaemons(struct lightningd *ld)
 	 * single-threaded, so commits never fail and we don't need
 	 * spin-and-retry logic everywhere. */
 	db_commit_transaction(ld->wallet->db);
+}
+
+static void shutdown_global_subdaemons(struct lightningd *ld)
+{
+	/* Let everyone shutdown cleanly. */
+	close(ld->hsm_fd);
+
+	/*~ The three "global" daemons, which we shutdown explicitly: we
+	 * give them 10 seconds to exit gracefully before killing them.  */
+	ld->connectd = subd_shutdown(ld->connectd, 10);
+	ld->gossip = subd_shutdown(ld->gossip, 10);
+	ld->hsm = subd_shutdown(ld->hsm, 10);
 }
 
 /*~ Our wallet logic needs to know what outputs we might be interested in.  We
@@ -652,7 +656,7 @@ static void pidfile_create(const struct lightningd *ld)
 	/* Lock PID file, so future lockf will fail. */
 	if (lockf(pid_fd, F_TLOCK, 0) < 0)
 		/* Problem locking file */
-		err(1, "lightningd already running? Error locking PID file");
+		err(EXITCODE_PIDFILE_LOCK, "lightningd already running? Error locking PID file");
 
 	/*~ As closing the file will remove the lock, we need to keep it open;
 	 * the OS will close it implicitly when we exit for any reason. */
@@ -815,12 +819,16 @@ static struct feature_set *default_features(const tal_t *ctx)
 		OPTIONAL_FEATURE(OPT_DATA_LOSS_PROTECT),
 		OPTIONAL_FEATURE(OPT_UPFRONT_SHUTDOWN_SCRIPT),
 		OPTIONAL_FEATURE(OPT_GOSSIP_QUERIES),
-		OPTIONAL_FEATURE(OPT_VAR_ONION),
+		COMPULSORY_FEATURE(OPT_VAR_ONION),
 		COMPULSORY_FEATURE(OPT_PAYMENT_SECRET),
 		OPTIONAL_FEATURE(OPT_BASIC_MPP),
 		OPTIONAL_FEATURE(OPT_GOSSIP_QUERIES_EX),
 		OPTIONAL_FEATURE(OPT_STATIC_REMOTEKEY),
 		OPTIONAL_FEATURE(OPT_SHUTDOWN_ANYSEGWIT),
+		OPTIONAL_FEATURE(OPT_PAYMENT_METADATA),
+		OPTIONAL_FEATURE(OPT_SCID_ALIAS),
+		OPTIONAL_FEATURE(OPT_ZEROCONF),
+		OPTIONAL_FEATURE(OPT_CHANNEL_TYPE),
 #if EXPERIMENTAL_FEATURES
 		OPTIONAL_FEATURE(OPT_ANCHOR_OUTPUTS),
 		OPTIONAL_FEATURE(OPT_QUIESCE),
@@ -853,6 +861,7 @@ void lightningd_exit(struct lightningd *ld, int exit_code)
 {
 	ld->exit_code = tal(ld, int);
 	*ld->exit_code = exit_code;
+	log_debug(ld->log, "io_break: %s", __func__);
 	io_break(ld);
 }
 
@@ -953,7 +962,7 @@ int main(int argc, char *argv[])
 	/* Figure out where our daemons are first. */
 	ld->daemon_dir = find_daemon_dir(ld, argv[0]);
 	if (!ld->daemon_dir)
-		errx(1, "Could not find daemons");
+		errx(EXITCODE_SUBDAEMON_FAIL, "Could not find daemons");
 
 	/* Set up the feature bits for what we support */
 	ld->our_features = default_features(ld);
@@ -966,7 +975,7 @@ int main(int argc, char *argv[])
 
 	/*~ Set the default portnum according to the used network
 	 * similarly to what Bitcoin Core does to ports by default. */
-	ld->portnum = DEFAULT_PORT + chainparams->rpc_port - 8332;
+	ld->portnum = chainparams_get_ln_port(chainparams);
 
 	/*~ Initialize all the plugins we just registered, so they can
 	 *  do their thing and tell us about themselves (including
@@ -1042,9 +1051,12 @@ int main(int argc, char *argv[])
 
 	/*~ Our default names, eg. for the database file, are not dependent on
 	 * the network.  Instead, the db knows what chain it belongs to, and we
-	 * simple barf here if it's wrong. */
-	if (!wallet_network_check(ld->wallet))
-		errx(1, "Wallet network check failed.");
+	 * simple barf here if it's wrong.
+	 *
+	 * We also check that our node_id is what we expect: otherwise a change
+	 * in hsm_secret will have strange consequences! */
+	if (!wallet_sanity_check(ld->wallet))
+		errx(EXITCODE_WALLET_DB_MISMATCH, "Wallet sanity check failed.");
 
 	/*~ Initialize the transaction filter with our pubkeys. */
 	init_txfilter(ld->wallet, ld->owned_txfilter);
@@ -1147,10 +1159,16 @@ int main(int argc, char *argv[])
 			 "/dev/fd (if running in chroot) if you are "
 			 "approaching that many channels.");
 
+	/*~ If we have channels closing, make sure we re-xmit the last
+	 * transaction, in case bitcoind lost it. */
+	db_begin_transaction(ld->wallet->db);
+	resend_closing_transactions(ld);
+	db_commit_transaction(ld->wallet->db);
+
 	/*~ This is where we ask connectd to reconnect to any peers who have
 	 * live channels with us, and makes sure we're watching the funding
 	 * tx. */
-	activate_peers(ld);
+	setup_peers(ld);
 
 	/*~ Now that all the notifications for transactions are in place, we
 	 *  can start the poll loop which queries bitcoind for new blocks. */
@@ -1181,8 +1199,12 @@ int main(int argc, char *argv[])
 	 *  shut down.
 	 */
 	assert(io_loop_ret == ld);
+	log_debug(ld->log, "io_loop_with_timers: %s", __func__);
 
-	/* Fail JSON RPC requests and ignore plugin's responses */
+	/* Stop *new* JSON RPC requests. */
+	jsonrpc_stop_listening(ld->jsonrpc);
+
+	/* Give permission for things to get destroyed without getting upset. */
 	ld->state = LD_STATE_SHUTDOWN;
 
 	stop_fd = -1;
@@ -1203,13 +1225,24 @@ int main(int argc, char *argv[])
 
 	/* We're not going to collect our children. */
 	remove_sigchild_handler(sigchld_conn);
-	shutdown_subdaemons(ld);
 
-	/* Tell plugins we're shutting down, closes the db. */
+	/* Get rid of per-channel subdaemons. */
+	subd_shutdown_nonglobals(ld);
+
+	/* Tell plugins we're shutting down, use force if necessary. */
 	shutdown_plugins(ld);
 
-	/* Cleanup JSON RPC separately: destructors assume some list_head * in ld */
-	tal_free(ld->jsonrpc);
+	/* Now kill any remaining connections */
+	jsonrpc_stop_all(ld);
+
+	/* Get rid of major subdaemons. */
+	shutdown_global_subdaemons(ld);
+
+	/* Clean up internal peer/channel/htlc structures. */
+	free_all_channels(ld);
+
+	/* Now close database */
+	ld->wallet->db = tal_free(ld->wallet->db);
 
 	/* Clean our our HTLC maps, since they use malloc. */
 	htlc_in_map_clear(&ld->htlcs_in);

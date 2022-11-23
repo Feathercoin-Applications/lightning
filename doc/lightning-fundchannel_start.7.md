@@ -43,9 +43,15 @@ RETURN VALUE
 
 [comment]: # (GENERATE-FROM-SCHEMA-START)
 On success, an object is returned, containing:
-- **funding_address** (string): The address to send funding to for the channel
+
+- **funding\_address** (string): The address to send funding to for the channel. DO NOT SEND COINS TO THIS ADDRESS YET.
 - **scriptpubkey** (hex): The raw scriptPubkey for the address
-- **close_to** (hex, optional): The raw scriptPubkey which mutual close will go to; only present if *close_to* parameter was specified and peer supports `option_upfront_shutdown_script`
+- **close\_to** (hex, optional): The raw scriptPubkey which mutual close will go to; only present if *close_to* parameter was specified and peer supports `option_upfront_shutdown_script`
+- **mindepth** (u32, optional): Number of confirmations before we consider the channel active.
+
+The following warnings may also be returned:
+
+- **warning\_usage**: A warning not to prematurely broadcast the funding transaction (always present!)
 
 [comment]: # (GENERATE-FROM-SCHEMA-END)
 
@@ -79,4 +85,4 @@ RESOURCES
 
 Main web site: <https://github.com/ElementsProject/lightning>
 
-[comment]: # ( SHA256STAMP:eab533b02f2bffecef27724078461ed25f3a9b729c2432b80bbdc35aea670ca2)
+[comment]: # ( SHA256STAMP:b054bc55f69cc1f23f78f342974a8476eab84146bbcf57ab30095e8eba3ed849)

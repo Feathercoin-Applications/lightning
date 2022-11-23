@@ -22,6 +22,10 @@
             "type": "short_channel_id",
             "description": "the channel that received the HTLC"
           },
+          "in_htlc_id": {
+            "type": "u64",
+            "description": "the unique HTLC id the sender gave this (not present if incoming channel was closed before ugprade to v22.11)"
+          },
           "in_msatoshi": {
             "deprecated": true
           },
@@ -45,37 +49,46 @@
           },
           "out_channel": {
             "type": "short_channel_id",
-            "description": "the channel that the HTLC was forwarded to"
+            "description": "the channel that the HTLC (trying to) forward to"
           },
-          "payment_hash": {
-            "type": "hex",
-            "description": "payment hash sought by HTLC",
-            "maxLength": 64,
-            "minLength": 64
+          "out_htlc_id": {
+            "type": "u64",
+            "description": "the unique HTLC id we gave this when sending (may be missing even if out_channel is present, for old forwards before v22.11)"
+          },
+          "style": {
+            "type": "string",
+            "enum": [
+              "legacy",
+              "tlv"
+            ],
+            "description": "Either a legacy onion format or a modern tlv format"
           }
         },
         "allOf": [
           {
             "if": {
               "required": [
-                "out_channel"
+                "out_msat"
               ]
             },
             "then": {
               "additionalProperties": false,
               "required": [
                 "fee_msat",
-                "out_msat"
+                "out_msat",
+                "out_channel"
               ],
               "properties": {
                 "in_channel": {},
+                "in_htlc_id": {},
                 "in_msatoshi": {},
                 "in_msat": {},
                 "status": {},
+                "style": {},
                 "received_time": {},
                 "resolved_time": {},
                 "out_channel": {},
-                "payment_hash": {},
+                "out_htlc_id": {},
                 "failcode": {},
                 "failreason": {},
                 "fee": {
@@ -99,14 +112,16 @@
               "required": [],
               "properties": {
                 "in_channel": {},
+                "in_htlc_id": {},
                 "in_msatoshi": {},
                 "in_msat": {},
                 "status": {},
+                "style": {},
                 "received_time": {},
                 "resolved_time": {},
-                "payment_hash": {},
                 "failcode": {},
-                "failreason": {}
+                "failreason": {},
+                "out_channel": {}
               }
             }
           },
@@ -129,12 +144,14 @@
               ],
               "properties": {
                 "in_channel": {},
+                "in_htlc_id": {},
                 "in_msatoshi": {},
                 "in_msat": {},
                 "status": {},
+                "style": {},
                 "received_time": {},
                 "out_channel": {},
-                "payment_hash": {},
+                "out_htlc_id": {},
                 "fee": {},
                 "fee_msat": {},
                 "out_msatoshi": {},
@@ -151,12 +168,14 @@
               "additionalProperties": false,
               "properties": {
                 "in_channel": {},
+                "in_htlc_id": {},
                 "in_msatoshi": {},
                 "in_msat": {},
                 "status": {},
+                "style": {},
                 "received_time": {},
                 "out_channel": {},
-                "payment_hash": {},
+                "out_htlc_id": {},
                 "fee": {},
                 "fee_msat": {},
                 "failcode": {},
@@ -183,12 +202,14 @@
               "required": [],
               "properties": {
                 "in_channel": {},
+                "in_htlc_id": {},
                 "in_msatoshi": {},
                 "in_msat": {},
                 "status": {},
+                "style": {},
                 "received_time": {},
                 "out_channel": {},
-                "payment_hash": {},
+                "out_htlc_id": {},
                 "fee": {},
                 "fee_msat": {},
                 "out_msatoshi": {},
@@ -209,12 +230,14 @@
               "required": [],
               "properties": {
                 "in_channel": {},
+                "in_htlc_id": {},
                 "in_msatoshi": {},
                 "in_msat": {},
                 "status": {},
+                "style": {},
                 "received_time": {},
                 "out_channel": {},
-                "payment_hash": {},
+                "out_htlc_id": {},
                 "fee": {},
                 "fee_msat": {},
                 "out_msatoshi": {},

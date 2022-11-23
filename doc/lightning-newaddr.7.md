@@ -1,5 +1,5 @@
-lightning-newaddr -- Command for generating a new address to be used by c-lightning
-===================================================================================
+lightning-newaddr -- Command for generating a new address to be used by Core Lightning
+======================================================================================
 
 SYNOPSIS
 --------
@@ -10,7 +10,7 @@ DESCRIPTION
 -----------
 
 The **newaddr** RPC command generates a new address which can
-subsequently be used to fund channels managed by the c-lightning node.
+subsequently be used to fund channels managed by the Core Lightning node.
 
 The funding transaction needs to be confirmed before funds can be used.
 
@@ -24,11 +24,14 @@ for the same underlying key.
 
 If no *addresstype* is specified the address generated is a *bech32* address.
 
+To send an on-chain payment _from_ the Core Lightning node wallet, use `withdraw`. 
+
 RETURN VALUE
 ------------
 
 [comment]: # (GENERATE-FROM-SCHEMA-START)
 On success, an object is returned, containing:
+
 - **bech32** (string, optional): The bech32 (native segwit) address
 - **p2sh-segwit** (string, optional): The p2sh-wrapped address
 
@@ -55,4 +58,4 @@ RESOURCES
 
 Main web site: <https://github.com/ElementsProject/lightning>
 
-[comment]: # ( SHA256STAMP:1a7b5336bdb0dbc93c9e160bb36c20c0d0d3fb908bdd85a84499fbc99680f3a6)
+[comment]: # ( SHA256STAMP:e9650b5f1f4374007c8fde63dae2ac9981c952ed8074aabade39fcc0ebe21333)

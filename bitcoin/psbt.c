@@ -29,7 +29,7 @@ static struct wally_psbt *init_psbt(const tal_t *ctx, size_t num_inputs, size_t 
 		wally_err = wally_psbt_init_alloc(0, num_inputs, num_outputs, 0, &psbt);
 	assert(wally_err == WALLY_OK);
 	tal_add_destructor(psbt, psbt_destroy);
-	tal_wally_end(tal_steal(ctx, psbt));
+	tal_wally_end_onto(ctx, psbt, struct wally_psbt);
 
 	return psbt;
 }
@@ -63,7 +63,7 @@ struct wally_psbt *clone_psbt(const tal_t *ctx, struct wally_psbt *psbt)
 	tal_wally_start();
 	if (wally_psbt_clone_alloc(psbt, 0, &clone) != WALLY_OK)
 		abort();
-	tal_wally_end(tal_steal(ctx, clone));
+	tal_wally_end_onto(ctx, clone, struct wally_psbt);
 	return clone;
 }
 
@@ -90,12 +90,21 @@ struct wally_psbt *new_psbt(const tal_t *ctx, const struct wally_tx *wtx)
 								     wtx->inputs[i].script,
 								     wtx->inputs[i].script_len);
 			assert(wally_err == WALLY_OK);
+
+			/* Clear out script sig data */
+			psbt->tx->inputs[i].script_len = 0;
+			tal_free(psbt->tx->inputs[i].script);
+			psbt->tx->inputs[i].script = NULL;
 		}
 		if (wtx->inputs[i].witness) {
 			wally_err =
 				wally_psbt_input_set_final_witness(&psbt->inputs[i],
 								   wtx->inputs[i].witness);
 			assert(wally_err == WALLY_OK);
+
+			/* Delete the witness data */
+			wally_tx_witness_stack_free(psbt->tx->inputs[i].witness);
+			psbt->tx->inputs[i].witness = NULL;
 		}
 	}
 
@@ -268,18 +277,20 @@ bool psbt_input_set_signature(struct wally_psbt *psbt, size_t in,
 			      const struct bitcoin_signature *sig)
 {
 	u8 pk_der[PUBKEY_CMPR_LEN];
+	u8 sig_der[73];
+	size_t sig_len;
 	bool ok;
 
 	assert(in < psbt->num_inputs);
 
 	/* we serialize the compressed version of the key, wally likes this */
 	pubkey_to_der(pk_der, pubkey);
+	sig_len = signature_to_der(sig_der, sig);
 	tal_wally_start();
 	wally_psbt_input_set_sighash(&psbt->inputs[in], sig->sighash_type);
 	ok = wally_psbt_input_add_signature(&psbt->inputs[in],
 					    pk_der, sizeof(pk_der),
-					    sig->s.data,
-					    sizeof(sig->s.data)) == WALLY_OK;
+					    sig_der, sig_len) == WALLY_OK;
 	tal_wally_end(psbt);
 	return ok;
 }
@@ -616,11 +627,11 @@ bool psbt_finalize(struct wally_psbt *psbt)
 		/* BOLT #3:
 		 * #### `to_remote` Output
 		 *
-		 * If `option_anchor_outputs` applies to the commitment
+		 * If `option_anchors` applies to the commitment
 		 * transaction, the `to_remote` output is encumbered by a one
 		 * block csv lock.
 		 *
-		 *    <remote_pubkey> OP_CHECKSIGVERIFY 1 OP_CHECKSEQUENCEVERIFY
+		 *    <remotepubkey> OP_CHECKSIGVERIFY 1 OP_CHECKSEQUENCEVERIFY
 		 *
 		 * The output is spent by an input with `nSequence`
 		 * field set to `1` and witness:
@@ -634,7 +645,7 @@ bool psbt_finalize(struct wally_psbt *psbt)
 		wally_tx_witness_stack_add(stack,
 					   input->witness_script,
 					   input->witness_script_len);
-		input->final_witness = stack;
+		wally_psbt_input_set_final_witness(input, stack);
 	}
 
 	ok = (wally_psbt_finalize(psbt) == WALLY_OK);
@@ -656,7 +667,7 @@ struct wally_tx *psbt_final_tx(const tal_t *ctx, const struct wally_psbt *psbt)
 	else
 		wtx = NULL;
 
-	tal_wally_end(tal_steal(ctx, wtx));
+	tal_wally_end_onto(ctx, wtx, struct wally_tx);
 	return wtx;
 }
 
@@ -672,7 +683,7 @@ struct wally_psbt *psbt_from_b64(const tal_t *ctx,
 		tal_add_destructor(psbt, psbt_destroy);
 	else
 		psbt = NULL;
-	tal_wally_end(tal_steal(ctx, psbt));
+	tal_wally_end_onto(ctx, psbt, struct wally_psbt);
 
 	return psbt;
 }
@@ -685,7 +696,7 @@ char *psbt_to_b64(const tal_t *ctx, const struct wally_psbt *psbt)
 	tal_wally_start();
 	ret = wally_psbt_to_base64(psbt, 0, &serialized_psbt);
 	assert(ret == WALLY_OK);
-	tal_wally_end(tal_steal(ctx, serialized_psbt));
+	tal_wally_end_onto(ctx, serialized_psbt, char);
 
 	return serialized_psbt;
 }
@@ -723,7 +734,7 @@ struct wally_psbt *psbt_from_bytes(const tal_t *ctx, const u8 *bytes,
 		tal_add_destructor(psbt, psbt_destroy);
 	else
 		psbt = NULL;
-	tal_wally_end(tal_steal(ctx, psbt));
+	tal_wally_end_onto(ctx, psbt, struct wally_psbt);
 
 	return psbt;
 }
@@ -798,7 +809,7 @@ void psbt_txid(const tal_t *ctx,
 			wally_tx_set_input_script(tx, i, script, tal_bytelen(script));
 		}
 	}
-	tal_wally_end(tal_steal(ctx, tx));
+	tal_wally_end_onto(ctx, tx, struct wally_tx);
 
 	wally_txid(tx, txid);
 	if (wtx)

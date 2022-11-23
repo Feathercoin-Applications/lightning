@@ -10,18 +10,19 @@
 #include <common/dev_disconnect.h>
 #include <common/features.h>
 #include <common/gossip_constants.h>
-#include <common/gossip_rcvd_filter.h>
 #include <common/gossip_store.h>
 #include <common/memleak.h>
 #include <common/per_peer_state.h>
 #include <common/ping.h>
 #include <common/status.h>
 #include <common/timeout.h>
+#include <common/type_to_string.h>
 #include <common/utils.h>
 #include <common/wire_error.h>
 #include <connectd/connectd.h>
 #include <connectd/connectd_gossipd_wiregen.h>
 #include <connectd/connectd_wiregen.h>
+#include <connectd/gossip_rcvd_filter.h>
 #include <connectd/multiplex.h>
 #include <connectd/onion_message.h>
 #include <errno.h>
@@ -36,28 +37,151 @@
 #include <wire/wire_io.h>
 #include <wire/wire_sync.h>
 
+struct subd {
+	/* Owner: we are in peer->subds[] */
+	struct peer *peer;
+
+	/* The temporary or permanant channel_id */
+	struct channel_id channel_id;
+
+	/* In passing, we can have a temporary one, too. */
+	struct channel_id *temporary_channel_id;
+
+	/* The opening revocation basepoint, for v2 channel_id. */
+	struct pubkey *opener_revocation_basepoint;
+
+	/* The actual connection to talk to it (NULL if it's not connected yet)  */
+	struct io_conn *conn;
+
+	/* Input buffer */
+	u8 *in;
+
+	/* Output buffer */
+	struct msg_queue *outq;
+};
+
+static struct subd *find_subd(struct peer *peer,
+			      const struct channel_id *channel_id)
+{
+	for (size_t i = 0; i < tal_count(peer->subds); i++) {
+		struct subd *subd = peer->subds[i];
+
+		/* Once we see a message using the real channel_id, we
+		 * clear the temporary_channel_id */
+		if (channel_id_eq(&subd->channel_id, channel_id)) {
+			subd->temporary_channel_id
+				= tal_free(subd->temporary_channel_id);
+			return subd;
+		}
+		if (subd->temporary_channel_id
+		    && channel_id_eq(subd->temporary_channel_id, channel_id)) {
+			return subd;
+		}
+	}
+	return NULL;
+}
+
+/* Except for a reconnection, we finally free a peer when the io_conn
+ * is closed and all subds are gone. */
+static void maybe_free_peer(struct peer *peer)
+{
+	if (peer->to_peer)
+		return;
+	if (tal_count(peer->subds) != 0)
+		return;
+	status_debug("maybe_free_peer freeing peer!");
+	tal_free(peer);
+}
+
+/* We try to send the final messages, but if buffer is full and they're
+ * not reading, we have to give up. */
+static void close_peer_io_timeout(struct peer *peer)
+{
+	/* BROKEN means we'll trigger CI if we see it, though it's possible */
+	status_peer_broken(&peer->id, "Peer did not close, forcing close");
+	io_close(peer->to_peer);
+}
+
+static void close_subd_timeout(struct subd *subd)
+{
+	/* BROKEN means we'll trigger CI if we see it, though it's possible */
+	status_peer_broken(&subd->peer->id, "Subd did not close, forcing close");
+	io_close(subd->conn);
+}
+
+static void drain_peer(struct peer *peer)
+{
+	status_debug("drain_peer");
+	assert(!peer->draining);
+
+	/* Since we immediately free any subds we didn't connect yet,
+	 * we need peer->to_peer set so it won't free peer! */
+	assert(peer->to_peer);
+
+	/* Give the subds 5 seconds to close their fds to us. */
+	for (size_t i = 0; i < tal_count(peer->subds); i++) {
+		if (!peer->subds[i]->conn) {
+			/* Deletes itself from array, so be careful! */
+			tal_free(peer->subds[i]);
+			i--;
+			continue;
+		}
+		status_debug("drain_peer draining subd!");
+		notleak(new_reltimer(&peer->daemon->timers,
+				     peer->subds[i], time_from_sec(5),
+				     close_subd_timeout, peer->subds[i]));
+		/* Wake any outgoing queued on subd */
+		io_wake(peer->subds[i]->outq);
+	}
+
+	/* Wake them to ensure they notice the close! */
+	io_wake(&peer->subds);
+
+	if (peer->to_peer) {
+		/* You have 5 seconds to drain... */
+		notleak(new_reltimer(&peer->daemon->timers,
+				     peer->to_peer, time_from_sec(5),
+				     close_peer_io_timeout, peer));
+	}
+
+	/* Clean peer from hashtable; we no longer exist. */
+	destroy_peer(peer);
+	tal_del_destructor(peer, destroy_peer);
+
+	/* This is a 5-second leak, worst case! */
+	notleak(peer);
+
+	/* Start draining process! */
+	io_wake(peer->peer_outq);
+}
+
 void inject_peer_msg(struct peer *peer, const u8 *msg TAKES)
 {
 	status_peer_io(LOG_IO_OUT, &peer->id, msg);
 	msg_enqueue(peer->peer_outq, msg);
 }
 
+void multiplex_final_msg(struct peer *peer, const u8 *final_msg TAKES)
+{
+	inject_peer_msg(peer, final_msg);
+	drain_peer(peer);
+}
+
 /* Send warning, close connection to peer */
 static void send_warning(struct peer *peer, const char *fmt, ...)
 {
 	va_list ap;
+	u8 *msg;
 
 	va_start(ap, fmt);
 	status_vfmt(LOG_UNUSUAL, &peer->id, fmt, ap);
 	va_end(ap);
 
-	/* Close locally, send msg as final warning */
-	io_close(peer->to_subd);
-	peer->to_subd = NULL;
-
 	va_start(ap, fmt);
-	peer->final_msg = towire_warningfmtv(peer, NULL, fmt, ap);
+	msg = towire_warningfmtv(NULL, NULL, fmt, ap);
 	va_end(ap);
+
+	multiplex_final_msg(peer, take(msg));
 }
 
 /* Kicks off write_to_peer() to look for more gossip to send from store */
@@ -84,6 +208,26 @@ static struct oneshot *gossip_stream_timer(struct peer *peer)
 			    wake_gossip, peer);
 }
 
+/* It's so common to ask for "recent" gossip (we ask for 10 minutes
+ * ago, LND and Eclair ask for now, LDK asks for 1 hour ago) that it's
+ * worth keeping track of where that starts, so we can skip most of
+ * the store. */
+static void update_recent_timestamp(struct daemon *daemon)
+{
+	/* 2 hours allows for some clock drift, not too much gossip */
+	u32 recent = time_now().ts.tv_sec - 7200;
+
+	/* Only update every minute */
+	if (daemon->gossip_recent_time + 60 > recent)
+		return;
+
+	daemon->gossip_recent_time = recent;
+	daemon->gossip_store_recent_off
+		= find_gossip_store_by_timestamp(daemon->gossip_store_fd,
+						 daemon->gossip_store_recent_off,
+						 daemon->gossip_recent_time);
+}
+
 /* This is called once we need it: otherwise, the gossip_store may not exist,
  * since we start at the same time as gossipd itself. */
 static void setup_gossip_store(struct daemon *daemon)
@@ -93,10 +237,16 @@ static void setup_gossip_store(struct daemon *daemon)
 		status_failed(STATUS_FAIL_INTERNAL_ERROR,
 			      "Opening gossip_store %s: %s",
 			      GOSSIP_STORE_FILENAME, strerror(errno));
+
+	daemon->gossip_recent_time = 0;
+	daemon->gossip_store_recent_off = 1;
+	update_recent_timestamp(daemon);
+
 	/* gossipd will be writing to this, and it's not atomic!  Safest
 	 * way to find the "end" is to walk through. */
 	daemon->gossip_store_end
-		= find_gossip_store_end(daemon->gossip_store_fd, 1);
+		= find_gossip_store_end(daemon->gossip_store_fd,
+					daemon->gossip_store_recent_off);
 }
 
 void setup_peer_gossip_store(struct peer *peer,
@@ -124,7 +274,7 @@ void setup_peer_gossip_store(struct peer *peer,
 	}
 
 	peer->gs.gossip_timer = gossip_stream_timer(peer);
-	peer->gs.active = true;
+	peer->gs.active = IFDEV(!peer->daemon->dev_suppress_gossip, true);
 	peer->gs.timestamp_min = 0;
 	peer->gs.timestamp_max = UINT32_MAX;
 
@@ -211,7 +361,7 @@ static bool is_urgent(enum peer_wire type)
 	case WIRE_ACCEPT_CHANNEL:
 	case WIRE_FUNDING_CREATED:
 	case WIRE_FUNDING_SIGNED:
-	case WIRE_FUNDING_LOCKED:
+	case WIRE_CHANNEL_READY:
 	case WIRE_OPEN_CHANNEL2:
 	case WIRE_ACCEPT_CHANNEL2:
 	case WIRE_INIT_RBF:
@@ -234,7 +384,6 @@ static bool is_urgent(enum peer_wire type)
 	case WIRE_QUERY_CHANNEL_RANGE:
 	case WIRE_REPLY_CHANNEL_RANGE:
 	case WIRE_GOSSIP_TIMESTAMP_FILTER:
-	case WIRE_OBS2_ONION_MESSAGE:
 	case WIRE_ONION_MESSAGE:
 #if EXPERIMENTAL_FEATURES
 	case WIRE_STFU:
@@ -251,6 +400,12 @@ static bool is_urgent(enum peer_wire type)
 
 	/* plugins can inject other messages; assume not urgent. */
 	return false;
+}
+
+/* io_sock_shutdown, but in format suitable for an io_plan callback */
+static struct io_plan *io_sock_shutdown_cb(struct io_conn *conn, struct peer *unused)
+{
+	return io_sock_shutdown(conn);
 }
 
 static struct io_plan *encrypt_and_send(struct peer *peer,
@@ -288,6 +443,21 @@ static struct io_plan *encrypt_and_send(struct peer *peer,
 #endif
 	set_urgent_flag(peer, is_urgent(type));
 
+	/* BOLT #1:
+	 *
+	 * A sending node:
+	 *...
+	 *  - MAY close the connection after sending.
+	 */
+	if (type == WIRE_ERROR || type == WIRE_WARNING) {
+		/* Might already be draining... */
+		if (!peer->draining)
+			drain_peer(peer);
+
+		/* Close as soon as we've sent this. */
+		next = io_sock_shutdown_cb;
+	}
+
 	/* We free this and the encrypted version in next write_to_peer */
 	peer->sent_to_peer = cryptomsg_encrypt_msg(peer, &peer->cs, msg);
 	return io_write(peer->to_peer,
@@ -299,7 +469,23 @@ static struct io_plan *encrypt_and_send(struct peer *peer,
 /* Kicks off write_to_peer() to look for more gossip to send from store */
 static void wake_gossip(struct peer *peer)
 {
-	peer->gs.active = true;
+	bool flush_gossip_filter = true;
+
+#if DEVELOPER
+	/* With dev-fast-gossip, we clean every 2 seconds, which is too
+	 * fast for our slow tests!  So we only call this one time in 5
+	 * actually twice that, as it's not per-peer! */
+	static int gossip_age_count;
+
+	if (peer->daemon->dev_fast_gossip && gossip_age_count++ % 5 != 0)
+		flush_gossip_filter = false;
+#endif
+
+	/* Don't remember sent per-peer gossip forever. */
+	if (flush_gossip_filter)
+		gossip_rcvd_filter_age(peer->gs.grf);
+
+	peer->gs.active = IFDEV(!peer->daemon->dev_suppress_gossip, true);
 	io_wake(peer->peer_outq);
 
 	/* And go again in 60 seconds (from now, now when we finish!) */
@@ -311,7 +497,28 @@ static u8 *maybe_from_gossip_store(const tal_t *ctx, struct peer *peer)
 {
 	u8 *msg;
 
-	/* Not streaming yet? */
+	/* dev-mode can suppress all gossip */
+	if (IFDEV(peer->daemon->dev_suppress_gossip, false))
+		return NULL;
+
+	/* BOLT #7:
+	 *   - if the `gossip_queries` feature is negotiated:
+	 *     - MUST NOT relay any gossip messages it did not generate itself,
+	 *       unless explicitly requested.
+	 */
+
+	/* So, even if they didn't send us a timestamp_filter message,
+	 * we *still* send our own gossip. */
+	if (!peer->gs.gossip_timer) {
+		return gossip_store_next(ctx, &peer->daemon->gossip_store_fd,
+					 0, 0xFFFFFFFF,
+					 true,
+					 false,
+					 &peer->gs.off,
+					 &peer->daemon->gossip_store_end);
+	}
+
+	/* Not streaming right now? */
 	if (!peer->gs.active)
 		return NULL;
 
@@ -322,13 +529,12 @@ again:
 	msg = gossip_store_next(ctx, &peer->daemon->gossip_store_fd,
 				peer->gs.timestamp_min,
 				peer->gs.timestamp_max,
+				false,
+				false,
 				&peer->gs.off,
 				&peer->daemon->gossip_store_end);
 	/* Don't send back gossip they sent to us! */
 	if (msg) {
-		status_peer_debug(&peer->id,
-				  "Sending gossip %s",
-				  peer_wire_name(fromwire_peektype(msg)));
 		if (gossip_rcvd_filter_del(peer->gs.grf, msg)) {
 			msg = tal_free(msg);
 			goto again;
@@ -346,6 +552,10 @@ static void send_ping(struct peer *peer);
 
 static void set_ping_timer(struct peer *peer)
 {
+	if (IFDEV(peer->daemon->dev_no_ping_timer, false)) {
+		peer->ping_timer = NULL;
+		return;
+	}
 	peer->ping_timer = new_reltimer(&peer->daemon->timers, peer,
 					time_from_sec(15 + pseudorand(30)),
 					send_ping, peer);
@@ -353,16 +563,23 @@ static void set_ping_timer(struct peer *peer)
 
 static void send_ping(struct peer *peer)
 {
-	/* Already have a ping in flight? */
-	if (peer->expecting_pong != PONG_UNEXPECTED) {
-		status_peer_debug(&peer->id, "Last ping unreturned: hanging up");
-		if (peer->to_peer)
-			io_close(peer->to_peer);
-		return;
+	/* If it's still sending us traffic, maybe ping reply is backed up?
+	 * That's OK, ping is just to make sure it's still alive, and clearly
+	 * it is. */
+	if (time_before(peer->last_recv_time,
+			timeabs_sub(time_now(), time_from_sec(60)))) {
+		/* Already have a ping in flight? */
+		if (peer->expecting_pong != PONG_UNEXPECTED) {
+			status_peer_debug(&peer->id, "Last ping unreturned: hanging up");
+			if (peer->to_peer)
+				io_close(peer->to_peer);
+			return;
+		}
+
+		inject_peer_msg(peer, take(make_ping(NULL, 1, 0)));
+		peer->expecting_pong = PONG_EXPECTED_PROBING;
 	}
 
-	inject_peer_msg(peer, take(make_ping(NULL, 1, 0)));
-	peer->expecting_pong = PONG_EXPECTED_PROBING;
 	set_ping_timer(peer);
 }
 
@@ -407,7 +624,7 @@ static void handle_ping_reply(struct peer *peer, const u8 *msg)
 		status_peer_unusual(&peer->id, "Got malformed ping reply %s",
 				    tal_hex(tmpctx, msg));
 
-	/* We print this because dev versions of c-lightning embed
+	/* We print this because dev versions of Core Lightning embed
 	 * version here: see check_ping_make_pong! */
 	for (i = 0; i < tal_count(ignored); i++) {
 		if (ignored[i] < ' ' || ignored[i] == 127)
@@ -449,7 +666,7 @@ static void handle_gossip_in(struct peer *peer, const u8 *msg)
 	daemon_conn_send(peer->daemon->gossipd, take(gmsg));
 }
 
-static void handle_gossip_timetamp_filter_in(struct peer *peer, const u8 *msg)
+static void handle_gossip_timestamp_filter_in(struct peer *peer, const u8 *msg)
 {
 	struct bitcoin_blkid chain_hash;
 	u32 first_timestamp, timestamp_range;
@@ -477,7 +694,19 @@ static void handle_gossip_timetamp_filter_in(struct peer *peer, const u8 *msg)
 	if (peer->gs.timestamp_max < peer->gs.timestamp_min)
 		peer->gs.timestamp_max = UINT32_MAX;
 
-	peer->gs.off = 1;
+	/* Optimization: they don't want anything.  LND and us (at least),
+	 * both set first_timestamp to 0xFFFFFFFF to indicate that. */
+	if (peer->gs.timestamp_min == UINT32_MAX)
+		peer->gs.off = peer->daemon->gossip_store_end;
+	else {
+		/* Second optimation: it's common to ask for "recent" gossip,
+		 * so we don't have to start at beginning of store. */
+		update_recent_timestamp(peer->daemon);
+		if (peer->gs.timestamp_min >= peer->daemon->gossip_recent_time)
+			peer->gs.off = peer->daemon->gossip_store_recent_off;
+		else
+			peer->gs.off = 1;
+	}
 
 	/* BOLT #7:
 	 *    - MAY wait for the next outgoing gossip flush to send these.
@@ -513,20 +742,16 @@ static bool handle_message_locally(struct peer *peer, const u8 *msg)
 	enum peer_wire type = fromwire_peektype(msg);
 
 	/* We remember these so we don't rexmit them */
-	if (is_msg_gossip_broadcast(msg))
-		gossip_rcvd_filter_add(peer->gs.grf, msg);
+	gossip_rcvd_filter_add(peer->gs.grf, msg);
 
 	if (type == WIRE_GOSSIP_TIMESTAMP_FILTER) {
-		handle_gossip_timetamp_filter_in(peer, msg);
+		handle_gossip_timestamp_filter_in(peer, msg);
 		return true;
 	} else if (type == WIRE_PING) {
 		handle_ping_in(peer, msg);
 		return true;
 	} else if (type == WIRE_PONG) {
 		handle_pong_in(peer, msg);
-		return true;
-	} else if (type == WIRE_OBS2_ONION_MESSAGE) {
-		handle_obs2_onion_message(peer->daemon, peer, msg);
 		return true;
 	} else if (type == WIRE_ONION_MESSAGE) {
 		handle_onion_message(peer->daemon, peer, msg);
@@ -544,20 +769,174 @@ static bool handle_message_locally(struct peer *peer, const u8 *msg)
 	return false;
 }
 
-static void close_timeout(struct peer *peer)
+/* Move "channel_id" to temporary. */
+static void move_channel_id_to_temp(struct subd *subd)
 {
-	/* BROKEN means we'll trigger CI if we see it, though it's possible */
-	status_peer_broken(&peer->id, "Peer did not close, forcing close");
-	tal_free(peer->to_peer);
+	tal_free(subd->temporary_channel_id);
+	subd->temporary_channel_id
+		= tal_dup(subd, struct channel_id, &subd->channel_id);
 }
 
-/* Close this in 5 seconds if it doesn't do so by itself. */
-static void set_closing_timer(struct peer *peer,
-			      struct io_conn *peer_conn)
+/* Only works for open_channel2 and accept_channel2 */
+static struct pubkey *extract_revocation_basepoint(const tal_t *ctx,
+						   const u8 *msg)
 {
-	notleak(new_reltimer(&peer->daemon->timers,
-			     peer_conn, time_from_sec(5),
-			     close_timeout, peer));
+	const u8 *cursor = msg;
+	size_t max = tal_bytelen(msg);
+	enum peer_wire t;
+	struct pubkey pubkey;
+
+	t = fromwire_u16(&cursor, &max);
+
+	switch (t) {
+ 	case WIRE_OPEN_CHANNEL2:
+		/* BOLT-dualfund #2:
+		 * 1. type: 64 (`open_channel2`)
+		 * 2. data:
+		 *    * [`chain_hash`:`chain_hash`]
+		 *    * [`channel_id`:`zerod_channel_id`]
+		 *    * [`u32`:`funding_feerate_perkw`]
+		 *    * [`u32`:`commitment_feerate_perkw`]
+		 *    * [`u64`:`funding_satoshis`]
+		 *    * [`u64`:`dust_limit_satoshis`]
+		 *    * [`u64`:`max_htlc_value_in_flight_msat`]
+		 *    * [`u64`:`htlc_minimum_msat`]
+		 *    * [`u16`:`to_self_delay`]
+		 *    * [`u16`:`max_accepted_htlcs`]
+		 *    * [`u32`:`locktime`]
+		 *    * [`point`:`funding_pubkey`]
+		 *    * [`point`:`revocation_basepoint`]
+		 */
+		fromwire_pad(&cursor, &max,
+			     sizeof(struct bitcoin_blkid)
+			     + sizeof(struct channel_id)
+			     + sizeof(u32)
+			     + sizeof(u32)
+			     + sizeof(u64)
+			     + sizeof(u64)
+			     + sizeof(u64)
+			     + sizeof(u64)
+			     + sizeof(u16)
+			     + sizeof(u16)
+			     + sizeof(u32)
+			     + PUBKEY_CMPR_LEN);
+		break;
+ 	case WIRE_ACCEPT_CHANNEL2:
+		/* BOLT-dualfund #2:
+		 * 1. type: 65 (`accept_channel2`)
+		 * 2. data:
+		 *     * [`channel_id`:`zerod_channel_id`]
+		 *     * [`u64`:`funding_satoshis`]
+		 *     * [`u64`:`dust_limit_satoshis`]
+		 *     * [`u64`:`max_htlc_value_in_flight_msat`]
+		 *     * [`u64`:`htlc_minimum_msat`]
+		 *     * [`u32`:`minimum_depth`]
+		 *     * [`u16`:`to_self_delay`]
+		 *     * [`u16`:`max_accepted_htlcs`]
+		 *     * [`point`:`funding_pubkey`]
+		 *     * [`point`:`revocation_basepoint`]
+		 */
+		fromwire_pad(&cursor, &max,
+			     sizeof(struct channel_id)
+			     + sizeof(u64)
+			     + sizeof(u64)
+			     + sizeof(u64)
+			     + sizeof(u64)
+			     + sizeof(u32)
+			     + sizeof(u16)
+			     + sizeof(u16)
+			     + PUBKEY_CMPR_LEN);
+		break;
+	default:
+		abort();
+	}
+
+	fromwire_pubkey(&cursor, &max, &pubkey);
+	if (!cursor)
+		return NULL;
+	return tal_dup(ctx, struct pubkey, &pubkey);
+}
+
+/* Only works for funding_created */
+static bool extract_funding_created_funding(const u8 *funding_created,
+					    struct bitcoin_outpoint *outp)
+{
+	const u8 *cursor = funding_created;
+	size_t max = tal_bytelen(funding_created);
+	enum peer_wire t;
+
+	t = fromwire_u16(&cursor, &max);
+
+	switch (t) {
+ 	case WIRE_FUNDING_CREATED:
+	/* BOLT #2:
+	 * 1. type: 34 (`funding_created`)
+	 * 2. data:
+	 *     * [`32*byte`:`temporary_channel_id`]
+	 *     * [`sha256`:`funding_txid`]
+	 *     * [`u16`:`funding_output_index`]
+	 */
+		fromwire_pad(&cursor, &max, 32);
+		fromwire_bitcoin_txid(&cursor, &max, &outp->txid);
+		outp->n = fromwire_u16(&cursor, &max);
+		break;
+	default:
+		abort();
+	}
+
+	return cursor != NULL;
+}
+
+static void update_v1_channelid(struct subd *subd, const u8 *funding_created)
+{
+	struct bitcoin_outpoint outp;
+
+	if (!extract_funding_created_funding(funding_created, &outp)) {
+		status_peer_unusual(&subd->peer->id, "WARNING: funding_created no tx info?");
+		return;
+	}
+	move_channel_id_to_temp(subd);
+	derive_channel_id(&subd->channel_id, &outp);
+}
+
+static void update_v2_channelid(struct subd *subd, const u8 *accept_channel2)
+{
+	struct pubkey *acc_basepoint;
+
+	acc_basepoint = extract_revocation_basepoint(tmpctx, accept_channel2);
+	if (!acc_basepoint) {
+		status_peer_unusual(&subd->peer->id, "WARNING: accept_channel2 no revocation_basepoint?");
+		return;
+	}
+	if (!subd->opener_revocation_basepoint) {
+		status_peer_unusual(&subd->peer->id, "WARNING: accept_channel2 without open_channel2?");
+		return;
+	}
+
+	move_channel_id_to_temp(subd);
+	derive_channel_id_v2(&subd->channel_id,
+			     subd->opener_revocation_basepoint, acc_basepoint);
+}
+
+/* We maintain channel_id matching for subds by snooping: we set it manually
+ * for first packet (open_channel or open_channel2). */
+static void maybe_update_channelid(struct subd *subd, const u8 *msg)
+{
+	switch (fromwire_peektype(msg)) {
+	case WIRE_OPEN_CHANNEL:
+		extract_channel_id(msg, &subd->channel_id);
+		break;
+	case WIRE_OPEN_CHANNEL2:
+		subd->opener_revocation_basepoint
+			= extract_revocation_basepoint(subd, msg);
+		break;
+	case WIRE_ACCEPT_CHANNEL2:
+		update_v2_channelid(subd, msg);
+		break;
+	case WIRE_FUNDING_CREATED:
+		update_v1_channelid(subd, msg);
+		break;
+	}
 }
 
 static struct io_plan *write_to_peer(struct io_conn *peer_conn,
@@ -572,26 +951,18 @@ static struct io_plan *write_to_peer(struct io_conn *peer_conn,
 	/* Pop tail of send queue */
 	msg = msg_dequeue(peer->peer_outq);
 
-	/* Is it time to send final? */
-	if (!msg && peer->final_msg && !peer->to_subd) {
-		/* OK, send this then close. */
-		msg = peer->final_msg;
-		peer->final_msg = NULL;
-	}
-
 	/* Still nothing to send? */
 	if (!msg) {
-		/* We close once subds are all closed. */
-		if (!peer->to_subd) {
-			set_closing_timer(peer, peer_conn);
+		/* Draining?  We're done when subds are done. */
+		if (peer->draining && tal_count(peer->subds) == 0)
 			return io_sock_shutdown(peer_conn);
-		}
 
 		/* If they want us to send gossip, do so now. */
-		msg = maybe_from_gossip_store(NULL, peer);
+		if (!peer->draining)
+			msg = maybe_from_gossip_store(NULL, peer);
 		if (!msg) {
 			/* Tell them to read again, */
-			io_wake(&peer->subd_in);
+			io_wake(&peer->subds);
 
 			/* Wait for them to wake us */
 			return msg_queue_wait(peer_conn, peer->peer_outq,
@@ -615,50 +986,90 @@ static struct io_plan *write_to_peer(struct io_conn *peer_conn,
 }
 
 static struct io_plan *read_from_subd(struct io_conn *subd_conn,
-				      struct peer *peer);
+				      struct subd *subd);
 static struct io_plan *read_from_subd_done(struct io_conn *subd_conn,
-					   struct peer *peer)
+					   struct subd *subd)
 {
+	maybe_update_channelid(subd, subd->in);
+
 	/* Tell them to encrypt & write. */
-	msg_enqueue(peer->peer_outq, take(peer->subd_in));
-	peer->subd_in = NULL;
+	msg_enqueue(subd->peer->peer_outq, take(subd->in));
+	subd->in = NULL;
 
 	/* Wait for them to wake us */
-	return io_wait(subd_conn, &peer->subd_in, read_from_subd, peer);
+	return io_wait(subd_conn, &subd->peer->subds, read_from_subd, subd);
 }
 
 static struct io_plan *read_from_subd(struct io_conn *subd_conn,
-				      struct peer *peer)
+				      struct subd *subd)
 {
-	return io_read_wire(subd_conn, peer, &peer->subd_in,
-			    read_from_subd_done, peer);
+	return io_read_wire(subd_conn, subd, &subd->in,
+			    read_from_subd_done, subd);
 }
 
 /* These four function handle peer->subd */
 static struct io_plan *write_to_subd(struct io_conn *subd_conn,
-				     struct peer *peer)
+				     struct subd *subd)
 {
 	const u8 *msg;
-	assert(peer->to_subd == subd_conn);
+	assert(subd->conn == subd_conn);
 
 	/* Pop tail of send queue */
-	msg = msg_dequeue(peer->subd_outq);
+	msg = msg_dequeue(subd->outq);
 
 	/* Nothing to send? */
 	if (!msg) {
 		/* If peer is closed, close this. */
-		if (!peer->to_peer)
+		if (!subd->peer->to_peer)
 			return io_close(subd_conn);
 
 		/* Tell them to read again. */
-		io_wake(&peer->peer_in);
+		io_wake(&subd->peer->peer_in);
 
 		/* Wait for them to wake us */
-		return msg_queue_wait(subd_conn, peer->subd_outq,
-				      write_to_subd, peer);
+		return msg_queue_wait(subd_conn, subd->outq,
+				      write_to_subd, subd);
 	}
 
-	return io_write_wire(subd_conn, take(msg), write_to_subd, peer);
+	return io_write_wire(subd_conn, take(msg), write_to_subd, subd);
+}
+
+static void destroy_subd(struct subd *subd)
+{
+	struct peer *peer = subd->peer;
+	size_t pos;
+
+	for (pos = 0; peer->subds[pos] != subd; pos++)
+		assert(pos < tal_count(peer->subds));
+
+	tal_arr_remove(&peer->subds, pos);
+
+	/* Make sure we try to keep reading from peer (might
+	 * have been waiting for write_to_subd) */
+	io_wake(&peer->peer_in);
+
+	/* Maybe we were last subd out? */
+	maybe_free_peer(peer);
+}
+
+static struct subd *new_subd(struct peer *peer,
+			     const struct channel_id *channel_id)
+{
+	struct subd *subd;
+
+	subd = tal(peer, struct subd);
+	subd->peer = peer;
+	subd->outq = msg_queue_new(subd, false);
+	subd->channel_id = *channel_id;
+	subd->temporary_channel_id = NULL;
+	subd->opener_revocation_basepoint = NULL;
+	subd->conn = NULL;
+
+	/* Connect it to the peer */
+	tal_arr_expand(&peer->subds, subd);
+	tal_add_destructor(subd, destroy_subd);
+
+	return subd;
 }
 
 static struct io_plan *read_hdr_from_peer(struct io_conn *peer_conn,
@@ -667,8 +1078,10 @@ static struct io_plan *read_body_from_peer_done(struct io_conn *peer_conn,
 						struct peer *peer)
 {
        u8 *decrypted;
+       struct channel_id channel_id;
+       struct subd *subd;
 
-       decrypted = cryptomsg_decrypt_body(NULL, &peer->cs,
+       decrypted = cryptomsg_decrypt_body(tmpctx, &peer->cs,
 					  peer->peer_in);
        if (!decrypted) {
 	       status_peer_debug(&peer->id, "Bad encrypted packet len %zu",
@@ -678,31 +1091,64 @@ static struct io_plan *read_body_from_peer_done(struct io_conn *peer_conn,
        tal_free(peer->peer_in);
 
        /* dev_disconnect can disable read */
-       if (!IFDEV(peer->dev_read_enabled, true)) {
-	       tal_free(decrypted);
+       if (!IFDEV(peer->dev_read_enabled, true))
 	       return read_hdr_from_peer(peer_conn, peer);
-       }
+
+       /* We got something! */
+       peer->last_recv_time = time_now();
 
        /* Don't process packets while we're closing */
-       if (peer->told_to_close) {
-	       tal_free(decrypted);
+       if (peer->draining)
 	       return read_hdr_from_peer(peer_conn, peer);
-       }
 
        /* If we swallow this, just try again. */
-       if (handle_message_locally(peer, decrypted)) {
-	       tal_free(decrypted);
+       if (handle_message_locally(peer, decrypted))
+	       return read_hdr_from_peer(peer_conn, peer);
+
+       /* After this we should be able to match to subd by channel_id */
+       if (!extract_channel_id(decrypted, &channel_id)) {
+	       enum peer_wire type = fromwire_peektype(decrypted);
+
+	       /* We won't log this anywhere else, so do it here. */
+	       status_peer_io(LOG_IO_IN, &peer->id, decrypted);
+
+	       /* Could be a all-channel error or warning?  Log it
+		* more verbose, and hang up. */
+	       if (type == WIRE_ERROR || type == WIRE_WARNING) {
+		       char *desc = sanitize_error(tmpctx, decrypted, NULL);
+		       status_peer_info(&peer->id,
+					"Received %s: %s",
+					peer_wire_name(type), desc);
+		       return io_close(peer_conn);
+	       }
+
+	       /* This sets final_msg: will close after sending warning */
+	       send_warning(peer, "Unexpected message %s: %s",
+			    peer_wire_name(type),
+			    tal_hex(tmpctx, decrypted));
 	       return read_hdr_from_peer(peer_conn, peer);
        }
 
-       /* If there's no subd, discard and keep reading. */
-       if (!peer->to_subd) {
-	       tal_free(decrypted);
-	       return read_hdr_from_peer(peer_conn, peer);
+       /* If we don't find a subdaemon for this, create a new one. */
+       subd = find_subd(peer, &channel_id);
+       if (!subd) {
+	       enum peer_wire t = fromwire_peektype(decrypted);
+	       status_peer_debug(&peer->id, "Activating for message %s",
+				 peer_wire_name(t));
+	       subd = new_subd(peer, &channel_id);
+	       /* We tell lightningd to fire up a subdaemon to handle this! */
+	       daemon_conn_send(peer->daemon->master,
+				take(towire_connectd_peer_spoke(NULL, &peer->id,
+								peer->counter,
+								t,
+								&channel_id)));
        }
+
+       /* Even if we just created it, call this to catch open_channel2 */
+       maybe_update_channelid(subd, decrypted);
 
        /* Tell them to write. */
-       msg_enqueue(peer->subd_outq, take(decrypted));
+       msg_enqueue(subd->outq, take(decrypted));
 
        /* Wait for them to wake us */
        return io_wait(peer_conn, &peer->peer_in, read_hdr_from_peer, peer);
@@ -740,80 +1186,36 @@ static struct io_plan *read_hdr_from_peer(struct io_conn *peer_conn,
 		       read_body_from_peer, peer);
 }
 
-static struct io_plan *subd_conn_init(struct io_conn *subd_conn, struct peer *peer)
+static struct io_plan *subd_conn_init(struct io_conn *subd_conn,
+				      struct subd *subd)
 {
-	peer->to_subd = subd_conn;
+	subd->conn = subd_conn;
+
+	/* subd is a child of the conn: free when it closes! */
+	tal_steal(subd->conn, subd);
 	return io_duplex(subd_conn,
-			 read_from_subd(subd_conn, peer),
-			 write_to_subd(subd_conn, peer));
-}
-
-static void destroy_subd_conn(struct io_conn *subd_conn, struct peer *peer)
-{
-	assert(subd_conn == peer->to_subd);
-	peer->to_subd = NULL;
-	/* In case they were waiting for this to send final_msg */
-	if (peer->final_msg)
-		msg_wake(peer->peer_outq);
-
-	/* Make sure we try to keep reading from peer, so we know if
-	 * it hangs up! */
-	io_wake(&peer->peer_in);
-
-	/* If no peer, finally time to close */
-	if (!peer->to_peer && peer->told_to_close)
-		peer_conn_closed(peer);
-}
-
-void close_peer_conn(struct peer *peer)
-{
-	/* Make write_to_peer do flush after writing */
-	peer->told_to_close = true;
-
-	/* Already dead? */
-	if (!peer->to_subd && !peer->to_peer) {
-		peer_conn_closed(peer);
-		return;
-	}
-
-	/* In case it's not currently writing, wake write_to_peer */
-	msg_wake(peer->peer_outq);
-}
-
-bool multiplex_subd_setup(struct peer *peer, int *fd_for_subd)
-{
-	int fds[2];
-
-	if (socketpair(AF_LOCAL, SOCK_STREAM, 0, fds) != 0) {
-		status_broken("Failed to create socketpair: %s",
-			      strerror(errno));
-		return false;
-	}
-	peer->to_subd = io_new_conn(peer, fds[0], subd_conn_init, peer);
-	tal_add_destructor2(peer->to_subd, destroy_subd_conn, peer);
-	*fd_for_subd = fds[1];
-	return true;
+			 read_from_subd(subd_conn, subd),
+			 write_to_subd(subd_conn, subd));
 }
 
 static void destroy_peer_conn(struct io_conn *peer_conn, struct peer *peer)
 {
 	assert(peer->to_peer == peer_conn);
+
+	/* If subds need cleaning, this will do it */
+	if (!peer->draining)
+		drain_peer(peer);
+
 	peer->to_peer = NULL;
 
-	/* Flush internal connections if not already. */
-	if (peer->to_subd) {
-		msg_wake(peer->subd_outq);
-		return;
-	}
-
-	if (peer->told_to_close)
-		peer_conn_closed(peer);
+	/* Or if there were no subds, this will free the peer. */
+	maybe_free_peer(peer);
 }
 
 struct io_plan *multiplex_peer_setup(struct io_conn *peer_conn,
 				     struct peer *peer)
 {
-	/*~ If conn closes, we close the subd connections and wait for
+	/*~ If conn closes, we drain the subd connections and wait for
 	 * lightningd to tell us to close with the peer */
 	tal_add_destructor2(peer_conn, destroy_peer_conn, peer);
 
@@ -821,17 +1223,47 @@ struct io_plan *multiplex_peer_setup(struct io_conn *peer_conn,
 	peer->expecting_pong = PONG_UNEXPECTED;
 	set_ping_timer(peer);
 
+	/* This used to be in openingd; don't break tests. */
+	status_peer_debug(&peer->id, "Handed peer, entering loop");
+
 	return io_duplex(peer_conn,
 			 read_hdr_from_peer(peer_conn, peer),
 			 write_to_peer(peer_conn, peer));
 }
 
-void multiplex_final_msg(struct peer *peer, const u8 *final_msg TAKES)
+void peer_connect_subd(struct daemon *daemon, const u8 *msg, int fd)
 {
-	peer->told_to_close = true;
-	peer->final_msg = tal_dup_talarr(peer, u8, final_msg);
-	if (!peer->to_subd)
-		io_wake(peer->peer_outq);
+	struct node_id id;
+	u64 counter;
+	struct peer *peer;
+	struct channel_id channel_id;
+	struct subd *subd;
+
+	if (!fromwire_connectd_peer_connect_subd(msg, &id, &counter, &channel_id))
+		master_badmsg(WIRE_CONNECTD_PEER_CONNECT_SUBD, msg);
+
+	/* Races can happen: this might be gone by now (or reconnected!). */
+	peer = peer_htable_get(&daemon->peers, &id);
+	if (!peer || peer->counter != counter) {
+		close(fd);
+		return;
+	}
+
+	/* Could be disconnecting now */
+	if (!peer->to_peer) {
+		close(fd);
+		return;
+	}
+
+	/* If peer said something, we created this and queued msg. */
+	subd = find_subd(peer, &channel_id);
+	if (!subd)
+		subd = new_subd(peer, &channel_id);
+
+	assert(!subd->conn);
+
+	/* This sets subd->conn inside subd_conn_init, and reparents subd! */
+	io_new_conn(peer, fd, subd_conn_init, subd);
 }
 
 /* Lightningd says to send a ping */
@@ -874,7 +1306,6 @@ void send_manual_ping(struct daemon *daemon, const u8 *msg)
 	/* BOLT #1:
 	 *
 	 * A node receiving a `ping` message:
-	 *...
 	 *  - if `num_pong_bytes` is less than 65532:
 	 *    - MUST respond by sending a `pong` message, with `byteslen` equal
 	 *      to `num_pong_bytes`.

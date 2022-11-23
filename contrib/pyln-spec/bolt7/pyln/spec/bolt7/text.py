@@ -86,7 +86,7 @@ The `announcement_signatures` message is created by constructing a `channel_anno
 A node:
   - if the `open_channel` message has the `announce_channel` bit set AND a `shutdown` message has not been sent:
     - MUST send the `announcement_signatures` message.
-      - MUST NOT send `announcement_signatures` messages until `funding_locked`
+      - MUST NOT send `announcement_signatures` messages until `channel_ready`
       has been sent and received AND the funding transaction has at least six confirmations.
   - otherwise:
     - MUST NOT send the `announcement_signatures` message.
@@ -98,13 +98,15 @@ A node:
 
 A recipient node:
   - if the `short_channel_id` is NOT correct:
-    - SHOULD fail the channel.
+    - SHOULD send a `warning` and close the connection, or send an
+      `error` and fail the channel.
   - if the `node_signature` OR the `bitcoin_signature` is NOT correct:
-    - MAY fail the channel.
+    - MAY send a `warning` and close the connection, or send an
+      `error` and fail the channel.
   - if it has sent AND received a valid `announcement_signatures` message:
     - SHOULD queue the `channel_announcement` message for its peers.
-  - if it has not sent funding_locked:
-    - MAY defer handling the announcement_signatures until after it has sent funding_locked
+  - if it has not sent `channel_ready`:
+    - MAY defer handling the announcement_signatures until after it has sent `channel_ready`
     - otherwise:
       - MUST ignore it.
 
@@ -166,7 +168,7 @@ The origin node:
     - for the _Bitcoin blockchain_:
       - MUST set `chain_hash` value (encoded in hex) equal to `6fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000`.
   - MUST set `short_channel_id` to refer to the confirmed funding transaction,
-  as specified in [BOLT #2](02-peer-protocol.md#the-funding_locked-message).
+  as specified in [BOLT #2](02-peer-protocol.md#the-channel_ready-message).
     - Note: the corresponding output MUST be a P2WSH, as described in [BOLT #3](03-transactions.md#funding-transaction-output).
   - MUST set `node_id_1` and `node_id_2` to the public keys of the two nodes
   operating the channel, such that `node_id_1` is the lexicographically-lesser of the
@@ -202,7 +204,9 @@ The receiving node:
   - otherwise:
     - if `bitcoin_signature_1`, `bitcoin_signature_2`, `node_signature_1` OR
     `node_signature_2` are invalid OR NOT correct:
-      - SHOULD fail the connection.
+      - SHOULD send a `warning`.
+      - MAY close the connection.
+      - MUST ignore the message.
     - otherwise:
       - if `node_id_1` OR `node_id_2` are blacklisted:
         - SHOULD ignore the message.
@@ -221,7 +225,7 @@ The receiving node:
       - otherwise:
         - SHOULD store this `channel_announcement`.
   - once its funding output has been spent OR reorganized out:
-    - SHOULD forget a channel.
+    - SHOULD forget a channel after a 12-block delay.
 
 ### Rationale
 
@@ -245,6 +249,10 @@ New channel features are possible in the future: backwards compatible (or
 optional) features will have _odd_ feature bits, while incompatible features
 will have _even_ feature bits
 (["It's OK to be odd!"](00-introduction.md#glossary-and-terminology-guide)).
+
+A delay of 12-blocks is used when forgetting a channel on funding output spend
+as to permit a new `channel_announcement` to propagate which indicates this
+channel was spliced.
 
 ## The `node_announcement` Message
 
@@ -277,15 +285,16 @@ The following `address descriptor` types are defined:
 
    * `1`: ipv4; data = `[4:ipv4_addr][2:port]` (length 6)
    * `2`: ipv6; data = `[16:ipv6_addr][2:port]` (length 18)
-   * `3`: Tor v2 onion service; data = `[10:onion_addr][2:port]` (length 12)
-       * version 2 onion service addresses; Encodes an 80-bit, truncated `SHA-1`
-       hash of a 1024-bit `RSA` public key for the onion service (a.k.a. Tor
-       hidden service).
+   * `3`: Deprecated (length 12). Used to contain Tor v2 onion services.
    * `4`: Tor v3 onion service; data = `[35:onion_addr][2:port]` (length 37)
        * version 3 ([prop224](https://gitweb.torproject.org/torspec.git/tree/proposals/224-rend-spec-ng.txt))
          onion service addresses; Encodes:
          `[32:32_byte_ed25519_pubkey] || [2:checksum] || [1:version]`, where
          `checksum = sha3(".onion checksum" | pubkey || version)[:2]`.
+   * `5`: DNS hostname; data = `[1:hostname_len][hostname_len:hostname][2:port]` (length up to 258)
+       * `hostname` bytes MUST be ASCII characters.
+       * Non-ASCII characters MUST be encoded using Punycode:
+         https://en.wikipedia.org/wiki/Punycode
 
 ### Requirements
 
@@ -307,21 +316,25 @@ The origin node:
   - MUST place address descriptors in ascending order.
   - SHOULD NOT place any zero-typed address descriptors anywhere.
   - SHOULD use placement only for aligning fields that follow `addresses`.
-  - MUST NOT create a `type 1` OR `type 2` address descriptor with `port` equal
-  to 0.
+  - MUST NOT create a `type 1`, `type 2` or `type 5` address descriptor with
+  `port` equal to 0.
   - SHOULD ensure `ipv4_addr` AND `ipv6_addr` are routable addresses.
   - MUST set `features` according to [BOLT #9](09-features.md#assigned-features-flags)
   - SHOULD set `flen` to the minimum length required to hold the `features`
   bits it sets.
+  - SHOULD not announce a Tor v2 onion service.
+  - MUST NOT announce more than one `type 5` DNS hostname.
 
 The receiving node:
   - if `node_id` is NOT a valid compressed public key:
-    - SHOULD fail the connection.
+    - SHOULD send a `warning`.
+    - MAY close the connection.
     - MUST NOT process the message further.
   - if `signature` is NOT a valid signature (using `node_id` of the
   double-SHA256 of the entire message following the `signature` field, including
 any future fields appended to the end):
-    - SHOULD fail the connection.
+    - SHOULD send a `warning`.
+    - MAY close the connection.
     - MUST NOT process the message further.
   - if `features` field contains _unknown even bits_:
     - SHOULD NOT connect to the node.
@@ -332,9 +345,10 @@ any future fields appended to the end):
   defined above.
   - if `addrlen` is insufficient to hold the address descriptors of the
   known types:
-    - SHOULD fail the connection.
+    - SHOULD send a `warning`.
+    - MAY close the connection.
   - if `port` is equal to 0:
-    - SHOULD ignore `ipv6_addr` OR `ipv4_addr`.
+    - SHOULD ignore `ipv6_addr` OR `ipv4_addr` OR `hostname`.
   - if `node_id` is NOT previously known from a `channel_announcement` message,
   OR if `timestamp` is NOT greater than the last-received `node_announcement`
   from this `node_id`:
@@ -346,6 +360,10 @@ any future fields appended to the end):
       - MAY choose NOT to queue messages longer than the minimum expected length.
   - MAY use `rgb_color` AND `alias` to reference nodes in interfaces.
     - SHOULD insinuate their self-signed origins.
+  - SHOULD ignore Tor v2 onion services.
+  - if more than one `type 5` address is announced:
+    - SHOULD ignore the additional data.
+    - MUST not forward the `node_announcement`.
 
 ### Rationale
 
@@ -408,7 +426,7 @@ of *relaying* payments, not *sending* payments. When making a payment
     * [`u64`:`htlc_minimum_msat`]
     * [`u32`:`fee_base_msat`]
     * [`u32`:`fee_proportional_millionths`]
-    * [`u64`:`htlc_maximum_msat`] (option_channel_htlc_max)
+    * [`u64`:`htlc_maximum_msat`]
 
 The `channel_flags` bitfield is used to indicate the direction of the channel: it
 identifies the node that this update originated from and signals various options
@@ -420,18 +438,12 @@ individual bits:
 | 0             | `direction` | Direction this update refers to. |
 | 1             | `disable`   | Disable the channel.             |
 
-The `message_flags` bitfield is used to indicate the presence of optional
-fields in the `channel_update` message:
+The `message_flags` bitfield is used to provide additional details about the message:
 
-| Bit Position  | Name                      | Field                            |
-| ------------- | ------------------------- | -------------------------------- |
-| 0             | `option_channel_htlc_max` | `htlc_maximum_msat`              |
-
-Note that the `htlc_maximum_msat` field is static in the current
-protocol over the life of the channel: it is *not* designed to be
-indicative of real-time channel capacity in each direction, which
-would be both a massive data leak and uselessly spam the network (it
-takes an average of 30 seconds for gossip to propagate each hop).
+| Bit Position  | Name           |
+| ------------- | ---------------|
+| 0             | `must_be_one`  |
+| 1             | `dont_forward` |
 
 The `node_id` for the signature verification is taken from the corresponding
 `channel_announcement`: `node_id_1` if the least-significant bit of flags is 0
@@ -440,10 +452,13 @@ or `node_id_2` otherwise.
 ### Requirements
 
 The origin node:
-  - MUST NOT send a created `channel_update` before `funding_locked` has been received.
+  - MUST NOT send a created `channel_update` before `channel_ready` has been received.
   - MAY create a `channel_update` to communicate the channel parameters to the
   channel peer, even though the channel has not yet been announced (i.e. the
   `announce_channel` bit was not set).
+    - MUST set the `short_channel_id` to either an `alias` it has
+    received from the peer, or the real channel `short_channel_id`.
+    - MUST set `dont_forward` to 1 in `message_flags`
     - MUST NOT forward such a `channel_update` to other peers, for privacy
     reasons.
     - Note: such a `channel_update`, one not preceded by a
@@ -457,15 +472,8 @@ The origin node:
     - MUST set the `direction` bit of `channel_flags` to 0.
   - otherwise:
     - MUST set the `direction` bit of `channel_flags` to 1.
-  - if the `htlc_maximum_msat` field is present:
-    - MUST set the `option_channel_htlc_max` bit of `message_flags` to 1.
-    - MUST set `htlc_maximum_msat` to the maximum value it will send through this channel for a single HTLC.
-      - MUST set this to less than or equal to the channel capacity.
-      - MUST set this to less than or equal to `max_htlc_value_in_flight_msat`
-    it received from the peer.
-  - otherwise:
-    - MUST set the `option_channel_htlc_max` bit of `message_flags` to 0.
-  - MUST set bits in `channel_flags` and `message_flags `that are not assigned a meaning to 0.
+  - MUST set `must_be_one` in `message_flags` to 1.
+  - MUST set bits in `channel_flags` and `message_flags` that are not assigned a meaning to 0.
   - MAY create and send a `channel_update` with the `disable` bit set to 1, to
   signal a channel's temporary unavailability (e.g. due to a loss of
   connectivity) OR permanent unavailability (e.g. prior to an on-chain
@@ -484,6 +492,8 @@ The origin node:
   - MUST set `fee_proportional_millionths` to the amount (in millionths of a
   satoshi) it will charge per transferred satoshi.
   - SHOULD NOT create redundant `channel_update`s
+  - If it creates a new `channel_update` with updated channel parameters:
+    - SHOULD keep accepting the previous channel parameters for 10 minutes
 
 The receiving node:
   - if the `short_channel_id` does NOT match a previous `channel_announcement`,
@@ -495,8 +505,8 @@ The receiving node:
   - if `signature` is not a valid signature, using `node_id` of the
   double-SHA256 of the entire message following the `signature` field (including
   unknown fields following `fee_proportional_millionths`):
+    - SHOULD send a `warning` and close the connection.
     - MUST NOT process the message further.
-    - SHOULD fail the connection.
   - if the specified `chain_hash` value is unknown (meaning it isn't active on
   the specified chain):
     - MUST ignore the channel update.
@@ -506,7 +516,7 @@ The receiving node:
       - MAY blacklist this `node_id`.
       - MAY forget all channels associated with it.
     - if the fields below `timestamp` are equal:
-      - SHOULD ignore this message	
+      - SHOULD ignore this message
   - if `timestamp` is lower than that of the last-received
   `channel_update` for this `short_channel_id` AND for `node_id`:
     - SHOULD ignore the message.
@@ -516,14 +526,11 @@ The receiving node:
     - otherwise:
       - SHOULD queue the message for rebroadcasting.
       - MAY choose NOT to for messages longer than the minimum expected length.
-  - if the `option_channel_htlc_max` bit of `message_flags` is 0:
-    - MUST consider `htlc_maximum_msat` not to be present.
+  - if `htlc_maximum_msat` is greater than channel capacity:
+    - MAY blacklist this `node_id`
+    - SHOULD ignore this channel during route considerations.
   - otherwise:
-    - if `htlc_maximum_msat` is not present or greater than channel capacity:
-      - MAY blacklist this `node_id`
-      - SHOULD ignore this channel during route considerations.
-    - otherwise:
-      - SHOULD consider the `htlc_maximum_msat` when routing.
+    - SHOULD consider the `htlc_maximum_msat` when routing.
 
 ### Rationale
 
@@ -533,22 +540,16 @@ makes sense to have it be a UNIX timestamp (i.e. seconds since UTC
 1970-01-01). This cannot be a hard requirement, however, given the possible case
 of two `channel_update`s within a single second.
 
-It is assumed that more than one `channel_update` message changing the channel 
-parameters in the same second may be a DoS attempt, and therefore, the node responsible 
-for signing such messages may be blacklisted. However, a node may send a same 
-`channel_update` message with a different signature (changing the nonce in signature 
-signing), and hence fields apart from signature are checked to see if the channel 
-parameters have changed for the same timestamp. It is also important to note that 
-ECDSA signatures are malleable. So, an intermediate node who received the `channel_update` 
-message can rebroadcast it just by changing the `s` component of signature with `-s`. 
+It is assumed that more than one `channel_update` message changing the channel
+parameters in the same second may be a DoS attempt, and therefore, the node responsible
+for signing such messages may be blacklisted. However, a node may send a same
+`channel_update` message with a different signature (changing the nonce in signature
+signing), and hence fields apart from signature are checked to see if the channel
+parameters have changed for the same timestamp. It is also important to note that
+ECDSA signatures are malleable. So, an intermediate node who received the `channel_update`
+message can rebroadcast it just by changing the `s` component of signature with `-s`.
 This should however not result in the blacklist of the `node_id` from where
 the message originated.
-
-The explicit `option_channel_htlc_max` flag to indicate the presence
-of `htlc_maximum_msat` (rather than having `htlc_maximum_msat` implied
-by the message length) allows us to extend the `channel_update`
-with different fields in future.  Since channels are limited to 2^32-1
-millisatoshis in Bitcoin, the `htlc_maximum_msat` has the same restriction.
 
 The recommendation against redundant `channel_update`s minimizes spamming the network,
 however it is sometimes inevitable.  For example, a channel with a
@@ -558,6 +559,15 @@ the channel when the peer reestablishes contact.  Because gossip
 messages are batched and replace previous ones, the result may be a
 single seemingly-redundant update.
 
+When a node creates a new `channel_update` to change its channel parameters,
+it will take some time to propagate through the network and payers may use
+older parameters. It is recommended to keep accepting older parameters for
+at least 10 minutes to improve payment latency and reliability.
+
+The `must_be_one` field in `message_flags` was previously used to indicate
+the presence of the `htlc_maximum_msat` field. This field must now always
+be present, so `must_be_one` is a constant value, and ignored by receivers.
+
 ## Query Messages
 
 Negotiating the `gossip_queries` option via `init` enables a number
@@ -565,21 +575,17 @@ of extended queries for gossip synchronization.  These explicitly
 request what gossip should be received.
 
 There are several messages which contain a long array of
-`short_channel_id`s (called `encoded_short_ids`) so we utilize a
-simple compression scheme: the first byte indicates the encoding, the
-rest contains the data.
+`short_channel_id`s (called `encoded_short_ids`) so we include an encoding byte
+which allows for different encoding schemes to be defined in the future, if they
+provide benefit.
 
 Encoding types:
 * `0`: uncompressed array of `short_channel_id` types, in ascending order.
-* `1`: array of `short_channel_id` types, in ascending order, compressed with zlib deflate<sup>[1](#reference-1)</sup>
+* `1`: Previously used for zlib compression, this encoding MUST NOT be used.
 
-This encoding is also used for arrays of other types (timestamps, flags, ...), and specified with an `encoded_` prefix. For example, `encoded_timestamps` is an array of timestamps than can be either compressed (with a `1` prefix) or uncompressed (with a `0` prefix).
-
-Note that a 65535-byte zlib message can decompress into 67632120
-bytes<sup>[2](#reference-2)</sup>, but since the only valid contents
-are unique 8-byte values, no more than 14 bytes can be duplicated
-across the stream: as each duplicate takes at least 2 bits, no valid
-contents could decompress to more than 3669960 bytes.
+This encoding is also used for arrays of other types (timestamps, flags, ...),
+and specified with an `encoded_` prefix. For example, `encoded_timestamps` is
+an array of timestamps with a `0` prefix.
 
 Query messages can be extended with optional fields that can help reduce the number of messages needed to synchronize routing tables by enabling:
 
@@ -646,16 +652,21 @@ The sender:
 
 The receiver:
   - if the first byte of `encoded_short_ids` is not a known encoding type:
-    - MAY fail the connection
+    - MAY send a `warning`.
+    - MAY close the connection.
   - if `encoded_short_ids` does not decode into a whole number of `short_channel_id`:
-    - MAY fail the connection.
+    - MAY send a `warning`.
+    - MAY close the connection.
   - if it has not sent `reply_short_channel_ids_end` to a previously received `query_short_channel_ids` from this sender:
-    - MAY fail the connection.
+    - MAY send a `warning`.
+    - MAY close the connection.
   - if the incoming message includes `query_short_channel_ids_tlvs`:
     - if `encoding_type` is not a known encoding type:
-      - MAY fail the connection
+      - MAY send a `warning`.
+      - MAY close the connection.
     - if `encoded_query_flags` does not decode to exactly one flag per `short_channel_id`:
-      - MAY fail the connection.
+      - MAY send a `warning`.
+      - MAY close the connection.
   - MUST respond to each known `short_channel_id`:
     - if the incoming message does not include `encoded_query_flags`:
       - with a `channel_announcement` and the latest `channel_update` for each end
@@ -775,20 +786,21 @@ The sender of `query_channel_range`:
 
 The receiver of `query_channel_range`:
   - if it has not sent all `reply_channel_range` to a previously received `query_channel_range` from this sender:
-    - MAY fail the connection.
+    - MAY send a `warning`.
+    - MAY close the connection.
   - MUST respond with one or more `reply_channel_range`:
     - MUST set with `chain_hash` equal to that of `query_channel_range`,
     - MUST limit `number_of_blocks` to the maximum number of blocks whose
       results could fit in `encoded_short_ids`
     - MAY split block contents across multiple `reply_channel_range`.
     - the first `reply_channel_range` message:
-	  - MUST set `first_blocknum` less than or equal to the `first_blocknum` in `query_channel_range`
-	  - MUST set `first_blocknum` plus `number_of_blocks` greater than `first_blocknum` in `query_channel_range`.
-	- successive `reply_channel_range` message:
-	  - MUST have `first_blocknum` equal or greater than the previous `first_blocknum`.
+      - MUST set `first_blocknum` less than or equal to the `first_blocknum` in `query_channel_range`
+      - MUST set `first_blocknum` plus `number_of_blocks` greater than `first_blocknum` in `query_channel_range`.
+    - successive `reply_channel_range` message:
+      - MUST have `first_blocknum` equal or greater than the previous `first_blocknum`.
     - MUST set `sync_complete` to `false` if this is not the final `reply_channel_range`.
-	- the final `reply_channel_range` message:
-	  - MUST have `first_blocknum` plus `number_of_blocks` equal or greater than the `query_channel_range` `first_blocknum` plus `number_of_blocks`.
+    - the final `reply_channel_range` message:
+      - MUST have `first_blocknum` plus `number_of_blocks` equal or greater than the `query_channel_range` `first_blocknum` plus `number_of_blocks`.
     - MUST set `sync_complete` to `true`.
 
 If the incoming message includes `query_option`, the receiver MAY append additional information to its reply:
@@ -978,8 +990,8 @@ A node:
 #### Requirements
 
 A node:
-  - if a channel's oldest `channel_update`s `timestamp` is older than two weeks
-  (1209600 seconds):
+  - if the `timestamp` of the latest `channel_update` in either direction is
+  older than two weeks (1209600 seconds):
     - MAY prune the channel.
     - MAY ignore the channel.
     - Note: this is an individual node policy and MUST NOT be enforced by
@@ -1094,7 +1106,7 @@ per [HTLC Fees](#htlc-fees):
 
         200 + ( 4999999 * 2000 / 1000000 ) = 10199
 
-Similarly, it would need to add B->C's `channel_update` `cltv_expiry` (20), C's
+Similarly, it would need to add B->C's `channel_update` `cltv_expiry_delta` (20), C's
 requested `min_final_cltv_expiry` (9), and the cost for the _shadow route_ (42).
 Thus, A->B's `update_add_htlc` message would be:
 
@@ -1118,10 +1130,6 @@ A->D's `update_add_htlc` message would be:
 And D->C's `update_add_htlc` would again be the same as B->C's direct payment
 above.
 
-## References
-
-1. <a id="reference-1">[RFC 1950 "ZLIB Compressed Data Format Specification version 3.3](https://www.ietf.org/rfc/rfc1950.txt)</a>
-2. <a id="reference-2">[Maximum Compression Factor](https://zlib.net/zlib_tech.html)</a>
 
 ![Creative Commons License](https://i.creativecommons.org/l/by/4.0/88x31.png "License CC-BY")
 <br>

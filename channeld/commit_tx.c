@@ -120,7 +120,7 @@ struct bitcoin_tx *commit_tx(const tal_t *ctx,
 	struct amount_sat base_fee;
 	struct amount_msat total_pay;
 	struct bitcoin_tx *tx;
-	size_t i, n, untrimmed;
+	size_t n, untrimmed;
 	/* Is this the lessor ? */
 	enum side lessor = !opener;
 	u32 *cltvs;
@@ -181,7 +181,7 @@ struct bitcoin_tx *commit_tx(const tal_t *ctx,
 	{
 		struct amount_sat out = AMOUNT_SAT(0);
 		bool ok = true;
-		for (i = 0; i < tal_count(htlcs); i++) {
+		for (size_t i = 0; i < tal_count(htlcs); i++) {
 			if (!trim(htlcs[i], feerate_per_kw, dust_limit,
 				  option_anchor_outputs, side))
 				ok &= amount_sat_add(&out, out, amount_msat_to_sat_round_down(htlcs[i]->amount));
@@ -215,7 +215,7 @@ struct bitcoin_tx *commit_tx(const tal_t *ctx,
 	 * 4. For every offered HTLC, if it is not trimmed, add an
 	 *    [offered HTLC output](#offered-htlc-outputs).
 	 */
-	for (i = 0; i < tal_count(htlcs); i++) {
+	for (size_t i = 0; i < tal_count(htlcs); i++) {
 		if (htlc_owner(htlcs[i]) != side)
 			continue;
 		if (trim(htlcs[i], feerate_per_kw, dust_limit,
@@ -233,7 +233,7 @@ struct bitcoin_tx *commit_tx(const tal_t *ctx,
 	 * 5. For every received HTLC, if it is not trimmed, add an
 	 *    [received HTLC output](#received-htlc-outputs).
 	 */
-	for (i = 0; i < tal_count(htlcs); i++) {
+	for (size_t i = 0; i < tal_count(htlcs); i++) {
 		if (htlc_owner(htlcs[i]) == side)
 			continue;
 		if (trim(htlcs[i], feerate_per_kw, dust_limit,
@@ -298,7 +298,7 @@ struct bitcoin_tx *commit_tx(const tal_t *ctx,
 		 * If `option_anchors` applies to the commitment
 		 * transaction, the `to_remote` output is encumbered by a one
 		 * block csv lock.
-		 *    <remote_pubkey> OP_CHECKSIGVERIFY 1 OP_CHECKSEQUENCEVERIFY
+		 *    <remotepubkey> OP_CHECKSIGVERIFY 1 OP_CHECKSEQUENCEVERIFY
 		 *
 		 *...
 		 * Otherwise, this output is a simple P2WPKH to `remotepubkey`.
@@ -379,7 +379,7 @@ struct bitcoin_tx *commit_tx(const tal_t *ctx,
 	/* BOLT #3:
 	 *
 	 * 9. Sort the outputs into [BIP 69+CLTV
-	 *    order](#transaction-input-and-output-ordering)
+	 *    order](#transaction-output-ordering)
 	 */
 	permute_outputs(tx, cltvs, (const void **)*htlcmap);
 

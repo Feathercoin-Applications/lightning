@@ -1,5 +1,5 @@
-lightning-stop -- Command to shutdown the c-lightning node.
-============================================================
+lightning-stop -- Command to shutdown the Core Lightning node.
+==============================================================
 
 SYNOPSIS
 --------
@@ -9,7 +9,7 @@ SYNOPSIS
 DESCRIPTION
 -----------
 
-The **stop** is a RPC command to shut off the c-lightning node.
+The **stop** is a RPC command to shut off the Core Lightning node.
 
 EXAMPLE JSON REQUEST
 ------------
@@ -42,4 +42,4 @@ RESOURCES
 ---------
 
 Main web site: <https://github.com/ElementsProject/lightning>
-[comment]: # ( SHA256STAMP:bbdf7415bc7de519ca944c28326c334d9f014f4c987d7e3017ac628c6d1c55ec)
+[comment]: # ( SHA256STAMP:2103952683449a5aa313eefa9c850dc0ae1cf4aa65edeb7897a8748a010a9349)

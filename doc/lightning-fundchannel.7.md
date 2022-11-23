@@ -84,11 +84,13 @@ RETURN VALUE
 
 [comment]: # (GENERATE-FROM-SCHEMA-START)
 On success, an object is returned, containing:
+
 - **tx** (hex): The raw transaction which funded the channel
 - **txid** (txid): The txid of the transaction which funded the channel
 - **outnum** (u32): The 0-based output index showing which output funded the channel
-- **channel_id** (hex): The channel_id of the resulting channel (always 64 characters)
-- **close_to** (hex, optional): The raw scriptPubkey which mutual close will go to; only present if *close_to* parameter was specified and peer supports `option_upfront_shutdown_script`
+- **channel\_id** (hex): The channel_id of the resulting channel (always 64 characters)
+- **close\_to** (hex, optional): The raw scriptPubkey which mutual close will go to; only present if *close_to* parameter was specified and peer supports `option_upfront_shutdown_script`
+- **mindepth** (u32, optional): Number of confirmations before we consider the channel active.
 
 [comment]: # (GENERATE-FROM-SCHEMA-END)
 
@@ -113,4 +115,4 @@ RESOURCES
 
 Main web site: <https://github.com/ElementsProject/lightning>
 
-[comment]: # ( SHA256STAMP:4a8d7c524cfe257f961531929d14d3589efb6ecd182a33e92aade30af90406f8)
+[comment]: # ( SHA256STAMP:bca36e910b93b86fc42c2d047e703e9760250757cbf09d8cacdf4e3fe1a1f605)

@@ -9,7 +9,9 @@ SYNOPSIS
 DESCRIPTION
 -----------
 
-The **listconfigs** RPC command to list all configuration options, or with *config*, just that one.
+*config* (optional) is a configuration option name, or "plugin" to show plugin options
+
+The **listconfigs** RPC command to list all configuration options, or with *config* only a selection.
 
 The returned values reflect the current configuration, including
 showing default values (`dev-` options are not shown).
@@ -32,6 +34,7 @@ RETURN VALUE
 
 [comment]: # (GENERATE-FROM-SCHEMA-START)
 On success, an object is returned, containing:
+
 - **# version** (string, optional): Special field indicating the current version
 - **plugins** (array of objects, optional):
   - **path** (string): Full path of the plugin
@@ -48,6 +51,8 @@ On success, an object is returned, containing:
 - **rpc-file** (string, optional): `rpc-file` field from config or cmdline, or default
 - **disable-plugin** (array of strings, optional):
   - `disable-plugin` field from config or cmdline
+- **bookkeeper-dir** (string, optional): `bookkeeper-dir` field from config or cmdline, or default
+- **bookkeeper-db** (string, optional): `bookkeeper-db` field from config or cmdline, or default
 - **always-use-proxy** (boolean, optional): `always-use-proxy` field from config or cmdline, or default
 - **daemon** (boolean, optional): `daemon` field from config or cmdline, or default
 - **wallet** (string, optional): `wallet` field from config or cmdline, or default
@@ -57,6 +62,7 @@ On success, an object is returned, containing:
 - **experimental-offers** (boolean, optional): `experimental-offers` field from config or cmdline, or default
 - **experimental-shutdown-wrong-funding** (boolean, optional): `experimental-shutdown-wrong-funding` field from config or cmdline, or default
 - **experimental-websocket-port** (u16, optional): `experimental-websocket-port` field from config or cmdline, or default
+- **database-upgrade** (boolean, optional): `database-upgrade` field from config or cmdline
 - **rgb** (hex, optional): `rgb` field from config or cmdline, or default (always 6 characters)
 - **alias** (string, optional): `alias` field from config or cmdline, or default
 - **pid-file** (string, optional): `pid-file` field from config or cmdline, or default
@@ -71,6 +77,8 @@ On success, an object is returned, containing:
 - **rescan** (integer, optional): `rescan` field from config or cmdline, or default
 - **fee-per-satoshi** (u32, optional): `fee-per-satoshi` field from config or cmdline, or default
 - **max-concurrent-htlcs** (u32, optional): `max-concurrent-htlcs` field from config or cmdline, or default
+- **htlc-minimum-msat** (msat, optional): `htlc-minimum-msat` field from config or cmdline, or default
+- **htlc-maximum-msat** (msat, optional): `htlc-maximum-msat` field from config or cmdline, or default
 - **max-dust-htlc-exposure-msat** (msat, optional): `max-dust-htlc-exposure-mast` field from config or cmdline, or default
 - **min-capacity-sat** (u64, optional): `min-capacity-sat` field from config or cmdline, or default
 - **addr** (string, optional): `addr` field from config or cmdline (can be more than one)
@@ -80,6 +88,7 @@ On success, an object is returned, containing:
 - **autolisten** (boolean, optional): `autolisten` field from config or cmdline, or default
 - **proxy** (string, optional): `proxy` field from config or cmdline, or default
 - **disable-dns** (boolean, optional): `true` if `disable-dns` was set in config or cmdline
+- **disable-ip-discovery** (boolean, optional): `true` if `disable-ip-discovery` was set in config or cmdline
 - **encrypted-hsm** (boolean, optional): `true` if `encrypted-hsm` was set in config or cmdline
 - **rpc-file-mode** (string, optional): `rpc-file-mode` field from config or cmdline, or default
 - **log-level** (string, optional): `log-level` field from config or cmdline, or default
@@ -88,8 +97,10 @@ On success, an object is returned, containing:
 - **log-timestamps** (boolean, optional): `log-timestamps` field from config or cmdline, or default
 - **force-feerates** (string, optional): force-feerate configuration setting, if any
 - **subdaemon** (string, optional): `subdaemon` fields from config or cmdline if any (can be more than one)
-- **fetchinvoice-noconnect** (boolean, optional): `featchinvoice-noconnect` fileds from config or cmdline, or default
+- **fetchinvoice-noconnect** (boolean, optional): `fetchinvoice-noconnect` fields from config or cmdline, or default
+- **accept-htlc-tlv-types** (string, optional): `accept-extra-tlvs-type` fields from config or cmdline, or not present
 - **tor-service-password** (string, optional): `tor-service-password` field from config or cmdline, if any
+- **dev-allowdustreserve** (boolean, optional): Whether we allow setting dust reserves
 
 [comment]: # (GENERATE-FROM-SCHEMA-END)
 
@@ -185,7 +196,6 @@ EXAMPLE JSON RESPONSE
    "autolisten": true,
    "proxy": "127.0.0.1:9050",
    "disable-dns": "false",
-   "enable-autotor-v2-mode": "false",
    "encrypted-hsm": false,
    "rpc-file-mode": "0600",
    "log-level": "DEBUG",
@@ -208,4 +218,4 @@ RESOURCES
 ---------
 
 Main web site: <https://github.com/ElementsProject/lightning>
-[comment]: # ( SHA256STAMP:59b197ad256bd701744ed5aa9f663166e48ef6320cf3a1538af0bd855daa3186)
+[comment]: # ( SHA256STAMP:5871ac751654339ed65ab905d61f0bc3afbb8576a33a5c4e9a73d2084f438582)

@@ -6,10 +6,8 @@
 #include <common/bech32.h>
 #include <common/configdir.h>
 #include <common/json_command.h>
-#include <common/json_helpers.h>
-#include <common/json_tok.h>
+#include <common/json_param.h>
 #include <common/key_derive.h>
-#include <common/param.h>
 #include <common/psbt_keypath.h>
 #include <common/psbt_open.h>
 #include <common/type_to_string.h>
@@ -242,6 +240,7 @@ static void json_add_utxo(struct json_stream *response,
 {
 	const char *out;
 	bool reserved;
+	u32 current_height = get_block_height(wallet->ld->topology);
 
 	json_object_start(response, fieldname);
 	json_add_txid(response, "txid", &utxo->outpoint.txid);
@@ -273,13 +272,16 @@ static void json_add_utxo(struct json_stream *response,
 	if (utxo->spendheight)
 		json_add_string(response, "status", "spent");
 	else if (utxo->blockheight) {
-		json_add_string(response, "status", "confirmed");
+		json_add_string(response, "status",
+				utxo_is_immature(utxo, current_height)
+				    ? "immature"
+				    : "confirmed");
+
 		json_add_num(response, "blockheight", *utxo->blockheight);
 	} else
 		json_add_string(response, "status", "unconfirmed");
 
-	reserved = utxo_is_reserved(utxo,
-				    get_block_height(wallet->ld->topology));
+	reserved = utxo_is_reserved(utxo, current_height);
 	json_add_bool(response, "reserved", reserved);
 	if (reserved)
 		json_add_num(response, "reserved_to_block",
@@ -344,9 +346,8 @@ static struct command_result *json_listfunds(struct command *cmd,
 				continue;
 			json_object_start(response, NULL);
 			json_add_node_id(response, "peer_id", &p->id);
-			/* Mirrors logic in listpeers */
 			json_add_bool(response, "connected",
-				      channel_active(c) && c->connected);
+				      channel_is_connected(c));
 			json_add_string(response, "state",
 					channel_state_name(c));
 			if (c->scid)
@@ -558,9 +559,7 @@ static void json_transaction_details(struct json_stream *response,
 			json_object_start(response, NULL);
 
 			json_add_u32(response, "index", i);
-			if (deprecated_apis)
-				json_add_amount_sat_only(response, "satoshis", sat);
-			json_add_amount_sat_only(response, "msat", sat);
+			json_add_amount_sats_deprecated(response, "msat", "amount_msat", sat);
 
 #if EXPERIMENTAL_FEATURES
 			struct tx_annotation *ann = &tx->output_annotations[i];
@@ -653,6 +652,33 @@ static struct command_result *match_psbt_inputs_to_utxos(struct command *cmd,
 					    "Aborting PSBT signing. UTXO %s is not reserved",
 					    type_to_string(tmpctx, struct bitcoin_outpoint,
 							   &utxo->outpoint));
+
+		/* If the psbt doesn't have the UTXO info yet, add it.
+		 * We only add the witness_utxo for this */
+		if (!psbt->inputs[i].utxo && !psbt->inputs[i].witness_utxo) {
+			u8 *scriptPubKey;
+
+			if (utxo->is_p2sh) {
+				struct pubkey key;
+				u8 *redeemscript;
+				int wally_err;
+
+				bip32_pubkey(cmd->ld->wallet->bip32_base, &key,
+					     utxo->keyindex);
+				redeemscript = bitcoin_redeem_p2sh_p2wpkh(tmpctx, &key);
+				scriptPubKey = scriptpubkey_p2sh(tmpctx, redeemscript);
+
+				tal_wally_start();
+				wally_err = wally_psbt_input_set_redeem_script(&psbt->inputs[i],
+									       redeemscript,
+									       tal_bytelen(redeemscript));
+				assert(wally_err == WALLY_OK);
+				tal_wally_end(psbt);
+			} else
+				scriptPubKey = utxo->scriptPubkey;
+
+			psbt_input_set_wit_utxo(psbt, i, scriptPubKey, utxo->amount);
+		}
 		tal_arr_expand(utxos, utxo);
 	}
 
@@ -767,8 +793,9 @@ static struct command_result *json_signpsbt(struct command *cmd,
 	msg = wire_sync_read(cmd, cmd->ld->hsm_fd);
 
 	if (!fromwire_hsmd_sign_withdrawal_reply(cmd, msg, &signed_psbt))
-		fatal("HSM gave bad sign_withdrawal_reply %s",
-		      tal_hex(tmpctx, msg));
+		return command_fail(cmd, JSONRPC2_INVALID_PARAMS,
+				    "HSM gave bad sign_withdrawal_reply %s",
+				    tal_hex(tmpctx, msg));
 
 	response = json_stream_success(cmd);
 	json_add_psbt(response, "signed_psbt", signed_psbt);
@@ -861,7 +888,7 @@ static void sendpsbt_done(struct bitcoind *bitcoind UNUSED,
 	wallet_transaction_add(ld->wallet, sending->wtx, 0, 0);
 
 	/* Extract the change output and add it to the DB */
-	wallet_extract_owned_outputs(ld->wallet, sending->wtx, NULL, &change);
+	wallet_extract_owned_outputs(ld->wallet, sending->wtx, false, NULL, &change);
 	wally_txid(sending->wtx, &txid);
 
 	for (size_t i = 0; i < sending->psbt->num_outputs; i++)
@@ -875,7 +902,7 @@ static void sendpsbt_done(struct bitcoind *bitcoind UNUSED,
 
 static struct command_result *json_sendpsbt(struct command *cmd,
 					    const char *buffer,
-					    const jsmntok_t *obj UNNEEDED,
+					    const jsmntok_t *obj,
 					    const jsmntok_t *params)
 {
 	struct command_result *res;
@@ -924,9 +951,10 @@ static struct command_result *json_sendpsbt(struct command *cmd,
 
 	/* Now broadcast the transaction */
 	bitcoind_sendrawtx(cmd->ld->topology->bitcoind,
+			   cmd->id,
 			   tal_hex(tmpctx,
 				   linearize_wtx(tmpctx, sending->wtx)),
-			   sendpsbt_done, sending);
+			   false, sendpsbt_done, sending);
 
 	return command_still_pending(cmd);
 }

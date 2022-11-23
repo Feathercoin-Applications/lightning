@@ -2,6 +2,8 @@ FROM focal
 
 ENV TZ=UTC
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+ENV RUST_PROFILE=release
+ENV PATH=/root/.cargo/bin:$PATH
 
 RUN sed -i '/updates/d' /etc/apt/sources.list && \
     sed -i '/security/d' /etc/apt/sources.list
@@ -26,19 +28,27 @@ RUN apt-get update \
 	zip
 
 RUN wget https://bootstrap.pypa.io/get-pip.py -O /tmp/get-pip.py && python3 /tmp/get-pip.py \
-	&& rm /tmp/get-pip.py \
-	&& pip install mrkd mako
+    && rm /tmp/get-pip.py \
+    && pip install poetry
+
+RUN wget https://sh.rustup.rs -O rustup-install.sh && \
+    bash rustup-install.sh --default-toolchain none --quiet -y && \
+    rm rustup-install.sh && \
+    /root/.cargo/bin/rustup install 1.62
 
 RUN mkdir /build
 WORKDIR /build
 
 CMD git clone /repo /build \
+    && poetry export -o requirements.txt --without-hashes \
+    && pip install -r requirements.txt \
 	&& tools/build-release.sh zipfile \
 	&& mkdir -p /repro \
 	&& cd /repro \
 	&& unzip /build/release/*.zip \
 	&& cd clightning* \
-	&& tools/repro-build.sh \
+        && tools/repro-build.sh \
+        && mkdir -p /repo/release \
 	&& cp *.xz /build/release/* /repo/release/ \
 	&& cd /repo/release/ \
 	&& sha256sum *

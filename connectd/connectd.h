@@ -5,6 +5,7 @@
 #include <ccan/crypto/siphash24/siphash24.h>
 #include <ccan/htable/htable_type.h>
 #include <ccan/timer/timer.h>
+#include <common/channel_id.h>
 #include <common/crypto_state.h>
 #include <common/node_id.h>
 #include <common/pseudorand.h>
@@ -52,23 +53,23 @@ struct peer {
 	/* Connection to the peer */
 	struct io_conn *to_peer;
 
-	/* Connection to the subdaemon */
-	struct io_conn *to_subd;
+	/* Counter to distinguish this connection from the next re-connection */
+	u64 counter;
 
-	/* Final message to send to peer (and hangup) */
-	u8 *final_msg;
+	/* Is this draining?  If so, just keep writing until queue empty */
+	bool draining;
 
-	/* Set when we want to close. */
-	bool told_to_close;
+	/* Connections to the subdaemons */
+	struct subd **subds;
 
 	/* When socket has Nagle overridden */
 	bool urgent;
 
-	/* Input buffers. */
-	u8 *subd_in, *peer_in;
+	/* Input buffer. */
+	u8 *peer_in;
 
-	/* Output buffers. */
-	struct msg_queue *subd_outq, *peer_outq;
+	/* Output buffer. */
+	struct msg_queue *peer_outq;
 
 	/* Peer sent buffer (for freeing after sending) */
 	const u8 *sent_to_peer;
@@ -81,6 +82,9 @@ struct peer {
 
 	/* Random ping timer, to detect dead connections. */
 	struct oneshot *ping_timer;
+
+	/* Last time we received traffic */
+	struct timeabs last_recv_time;
 
 #if DEVELOPER
 	bool dev_read_enabled;
@@ -129,6 +133,9 @@ struct daemon {
 	/* pubkey equivalent. */
 	struct pubkey mykey;
 
+	/* Counter from which we derive connection identifiers. */
+	u64 connection_counter;
+
 	/* Base for timeout timers, and how long to wait for init msg */
 	struct timers timers;
 	u32 timeout_secs;
@@ -167,9 +174,6 @@ struct daemon {
 	/* File descriptors to listen on once we're activated. */
 	const struct listen_fd **listen_fds;
 
-	/* Allow to define the default behavior of tor services calls*/
-	bool use_v3_autotor;
-
 	/* Our features, as lightningd told us */
 	struct feature_set *our_features;
 
@@ -182,10 +186,19 @@ struct daemon {
 	/* The gossip_store */
 	int gossip_store_fd;
 	size_t gossip_store_end;
+	u32 gossip_recent_time;
+	size_t gossip_store_recent_off;
+
+	/* We only announce websocket addresses if !deprecated_apis */
+	bool announce_websocket;
 
 #if DEVELOPER
 	/* Hack to speed up gossip timer */
 	bool dev_fast_gossip;
+	/* Hack to avoid ping timeouts */
+	bool dev_no_ping_timer;
+	/* Hack to no longer send gossip */
+	bool dev_suppress_gossip;
 #endif
 };
 
@@ -205,7 +218,7 @@ struct io_plan *peer_connected(struct io_conn *conn,
 			       const u8 *their_features TAKES,
 			       bool incoming);
 
-/* Called when peer->peer_conn is finally freed */
-void peer_conn_closed(struct peer *peer);
+/* Removes peer from hash table, tells gossipd and lightningd. */
+void destroy_peer(struct peer *peer);
 
 #endif /* LIGHTNING_CONNECTD_CONNECTD_H */

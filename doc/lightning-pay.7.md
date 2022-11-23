@@ -5,8 +5,8 @@ SYNOPSIS
 --------
 
 **pay** *bolt11* [*msatoshi*] [*label*] [*riskfactor*]
-[*maxfeepercent*] [*retry\_for*] [*maxdelay*] [*exemptfee*]
-[*exclude*]
+[*maxfeepercent*] [*retry_for*] [*maxdelay*] [*exemptfee*]
+[*localinvreqid*] [*exclude*] [*maxfee*] [*description*]
 
 DESCRIPTION
 -----------
@@ -31,6 +31,22 @@ option can be used for tiny payments which would be dominated by the fee
 leveraged by forwarding nodes. Setting `exemptfee` allows the
 `maxfeepercent` check to be skipped on fees that are smaller than
 `exemptfee` (default: 5000 millisatoshi).
+
+`localinvreqid` is used by offers to link a payment attempt to a local
+`invoice_request` offer created by lightningd-invoicerequest(7).  This ensures
+that we only make a single payment for an offer, and that the offer is
+marked `used` once paid.
+
+*maxfee* overrides both *maxfeepercent* and *exemptfee* defaults (and
+if you specify *maxfee* you cannot specify either of those), and
+creates an absolute limit on what fee we will pay.  This allows you to
+implement your own heuristics rather than the primitive ones used
+here.
+
+*description* is only required for bolt11 invoices which do not
+contain a description themselves, but contain a description hash.
+*description* is then checked against the hash inside the invoice
+before it will be paid.
 
 The response will occur when the payment fails or succeeds. Once a
 payment has succeeded, calls to **pay** with the same *bolt11* will
@@ -78,17 +94,19 @@ RETURN VALUE
 
 [comment]: # (GENERATE-FROM-SCHEMA-START)
 On success, an object is returned, containing:
-- **payment_preimage** (hex): the proof of payment: SHA256 of this **payment_hash** (always 64 characters)
-- **payment_hash** (hex): the hash of the *payment_preimage* which will prove payment (always 64 characters)
-- **created_at** (number): the UNIX timestamp showing when this payment was initiated
+
+- **payment\_preimage** (secret): the proof of payment: SHA256 of this **payment_hash** (always 64 characters)
+- **payment\_hash** (hash): the hash of the *payment_preimage* which will prove payment (always 64 characters)
+- **created\_at** (number): the UNIX timestamp showing when this payment was initiated
 - **parts** (u32): how many attempts this took
-- **amount_msat** (msat): Amount the recipient received
-- **amount_sent_msat** (msat): Total amount we sent (including fees)
-- **status** (string): status of payment (always "complete")
+- **amount\_msat** (msat): Amount the recipient received
+- **amount\_sent\_msat** (msat): Total amount we sent (including fees)
+- **status** (string): status of payment (one of "complete", "pending", "failed")
 - **destination** (pubkey, optional): the final destination of the payment
 
 The following warnings may also be returned:
-- **warning_partial_completion**: Not all parts of a multi-part payment have completed
+
+- **warning\_partial\_completion**: Not all parts of a multi-part payment have completed
 
 [comment]: # (GENERATE-FROM-SCHEMA-END)
 
@@ -149,4 +167,4 @@ RESOURCES
 
 Main web site: <https://github.com/ElementsProject/lightning>
 
-[comment]: # ( SHA256STAMP:bf507985544575c4ef2fe194fda6a693378cb8ab3bfb30ca7a7c066be271be29)
+[comment]: # ( SHA256STAMP:6f7640af4859e4605f4369a4e17fcfbaead1be53928ad8101cc44fde6f441a97)

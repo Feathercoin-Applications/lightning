@@ -63,13 +63,40 @@ pub struct GetManifestCall {}
 #[derive(Deserialize, Debug)]
 pub(crate) struct InitCall {
     pub(crate) options: HashMap<String, Value>,
+    pub(crate) configuration: Configuration,
+}
+
+#[derive(Clone, Deserialize, Debug)]
+pub struct Configuration {
+    #[serde(rename = "lightning-dir")]
+    pub lightning_dir: String,
+    #[serde(rename = "rpc-file")]
+    pub rpc_file: String,
+    pub startup: bool,
+    pub network: String,
+    pub feature_set: HashMap<String, String>,
+
+    // The proxy related options are only populated if a proxy was
+    // configured.
+    pub proxy: Option<ProxyInfo>,
+    #[serde(rename = "torv3-enabled")]
+    pub torv3_enabled: Option<bool>,
+    pub always_use_proxy: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ProxyInfo {
+    #[serde(alias = "type")]
+    pub typ: String,
+    pub address: String,
+    pub port: i64,
 }
 
 #[derive(Debug)]
 pub enum JsonRpc<N, R> {
-    Request(usize, R),
+    Request(serde_json::Value, R),
     Notification(N),
-    CustomRequest(usize, Value),
+    CustomRequest(serde_json::Value, Value),
     CustomNotification(Value),
 }
 
@@ -98,7 +125,7 @@ where
     {
         #[derive(Deserialize, Debug)]
         struct IdHelper {
-            id: Option<usize>,
+            id: Option<serde_json::Value>,
         }
 
         let v = Value::deserialize(deserializer)?;
@@ -129,9 +156,66 @@ pub(crate) struct GetManifestResponse {
     pub(crate) rpcmethods: Vec<RpcMethod>,
     pub(crate) subscriptions: Vec<String>,
     pub(crate) hooks: Vec<String>,
+    pub(crate) dynamic: bool,
+    pub(crate) nonnumericids: bool,
 }
 
 #[derive(Serialize, Default, Debug)]
-pub struct InitResponse {}
+pub struct InitResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disable: Option<String>,
+}
 
 pub trait Response: Serialize + Debug {}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::messages;
+    use serde_json::json;
+
+    #[test]
+    fn test_init_message_parsing() {
+        let value = json!({
+            "jsonrpc": "2.0",
+            "method": "init",
+            "params": {
+                "options": {
+                    "greeting": "World",
+                    "number": [0]
+                },
+                "configuration": {
+                    "lightning-dir": "/home/user/.lightning/testnet",
+                    "rpc-file": "lightning-rpc",
+                    "startup": true,
+                    "network": "testnet",
+                    "feature_set": {
+                        "init": "02aaa2",
+                        "node": "8000000002aaa2",
+                        "channel": "",
+                        "invoice": "028200"
+                    },
+                    "proxy": {
+                        "type": "ipv4",
+                        "address": "127.0.0.1",
+                        "port": 9050
+                    },
+                    "torv3-enabled": true,
+                    "always_use_proxy": false
+                }
+            },
+            "id": "10",
+        });
+        let req: JsonRpc<Notification, Request> = serde_json::from_value(value).unwrap();
+        match req {
+            messages::JsonRpc::Request(_, messages::Request::Init(init)) => {
+                assert_eq!(init.options["greeting"], "World");
+                assert_eq!(
+                    init.configuration.lightning_dir,
+                    String::from("/home/user/.lightning/testnet")
+                );
+            }
+            _ => panic!("Couldn't parse init message"),
+        }
+    }
+}

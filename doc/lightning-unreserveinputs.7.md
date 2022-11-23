@@ -23,13 +23,15 @@ RETURN VALUE
 
 [comment]: # (GENERATE-FROM-SCHEMA-START)
 On success, an object containing **reservations** is returned.  It is an array of objects, where each object contains:
+
 - **txid** (txid): the transaction id
 - **vout** (u32): the output number which was reserved
-- **was_reserved** (boolean): whether the input was already reserved (usually `true`)
+- **was\_reserved** (boolean): whether the input was already reserved (usually `true`)
 - **reserved** (boolean): whether the input is now reserved (may still be `true` if it was reserved for a long time)
 
 If **reserved** is *true*:
-  - **reserved_to_block** (u32): what blockheight the reservation will expire
+
+  - **reserved\_to\_block** (u32): what blockheight the reservation will expire
 
 [comment]: # (GENERATE-FROM-SCHEMA-END)
 
@@ -53,4 +55,4 @@ RESOURCES
 
 Main web site: <https://github.com/ElementsProject/lightning>
 
-[comment]: # ( SHA256STAMP:f7aca3e1a40d66e07986cb9e98033e815c4eea2237dc75664a6c47951a8132ed)
+[comment]: # ( SHA256STAMP:41e0fba4aea57e12d91366a55663e7331e952b223eeb8fc9f83deb5a948f63b4)

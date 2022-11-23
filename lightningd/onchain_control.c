@@ -1,5 +1,6 @@
 #include "config.h"
 #include <bitcoin/feerate.h>
+#include <ccan/tal/str/str.h>
 #include <common/key_derive.h>
 #include <common/type_to_string.h>
 #include <db/exec.h>
@@ -8,6 +9,7 @@
 #include <inttypes.h>
 #include <lightningd/chaintopology.h>
 #include <lightningd/channel.h>
+#include <lightningd/channel_control.h>
 #include <lightningd/coin_mvts.h>
 #include <lightningd/hsm_control.h>
 #include <lightningd/onchain_control.h>
@@ -346,9 +348,9 @@ static void handle_onchain_broadcast_tx(struct channel *channel,
 	/* If the onchaind signals this as RBF-able, then we also
 	 * set allowhighfees, as the transaction may be RBFed into
 	 * high feerates as protection against the MAD-HTLC attack.  */
-	broadcast_tx_ahf(channel->peer->ld->topology, channel,
-			 tx, is_rbf,
-			 is_rbf ? &handle_onchain_broadcast_rbf_tx_cb : NULL);
+	broadcast_tx(channel->peer->ld->topology, channel,
+		     tx, NULL, is_rbf,
+		     is_rbf ? &handle_onchain_broadcast_rbf_tx_cb : NULL);
 }
 
 static void handle_onchain_unwatch_tx(struct channel *channel, const u8 *msg)
@@ -390,6 +392,14 @@ static void handle_missing_htlc_output(struct channel *channel, const u8 *msg)
 		return;
 	}
 
+	/* We only set tell_if_missing on LOCAL htlcs */
+	if (htlc.owner != LOCAL) {
+		channel_internal_error(channel,
+				       "onchaind_missing_htlc_output: htlc %"PRIu64" is not local!",
+				       htlc.id);
+		return;
+	}
+
 	/* BOLT #5:
 	 *
 	 *   - for any committed HTLC that does NOT have an output in this
@@ -400,7 +410,7 @@ static void handle_missing_htlc_output(struct channel *channel, const u8 *msg)
 	 *       corresponding to the HTLC.
 	 *       - MAY fail the corresponding incoming HTLC sooner.
 	 */
-	onchain_failed_our_htlc(channel, &htlc, "missing in commitment tx");
+	onchain_failed_our_htlc(channel, &htlc, "missing in commitment tx", false);
 }
 
 static void handle_onchain_htlc_timeout(struct channel *channel, const u8 *msg)
@@ -412,6 +422,14 @@ static void handle_onchain_htlc_timeout(struct channel *channel, const u8 *msg)
 		return;
 	}
 
+	/* It should tell us about timeouts on our LOCAL htlcs */
+	if (htlc.owner != LOCAL) {
+		channel_internal_error(channel,
+				       "onchaind_htlc_timeout: htlc %"PRIu64" is not local!",
+				       htlc.id);
+		return;
+	}
+
 	/* BOLT #5:
 	 *
 	 *   - if the commitment transaction HTLC output has *timed out* and
@@ -419,7 +437,7 @@ static void handle_onchain_htlc_timeout(struct channel *channel, const u8 *msg)
 	 *     - MUST *resolve* the output by spending it using the HTLC-timeout
 	 *     transaction.
 	 */
-	onchain_failed_our_htlc(channel, &htlc, "timed out");
+	onchain_failed_our_htlc(channel, &htlc, "timed out", true);
 }
 
 static void handle_irrevocably_resolved(struct channel *channel, const u8 *msg UNUSED)
@@ -596,7 +614,7 @@ enum watch_result onchaind_funding_spent(struct channel *channel,
 	struct lightningd *ld = channel->peer->ld;
 	struct pubkey final_key;
 	int hsmfd;
-	u32 feerates[3];
+	u32 feerates[4];
 	enum state_change reason;
 
 	/* use REASON_ONCHAIN or closer's reason, if known */
@@ -604,7 +622,18 @@ enum watch_result onchaind_funding_spent(struct channel *channel,
 	if (channel->closer != NUM_SIDES)
 		reason = REASON_UNKNOWN;  /* will use last cause as reason */
 
-	channel_fail_permanent(channel, reason, "Funding transaction spent");
+	channel_fail_permanent(channel, reason,
+			       "Funding transaction spent");
+
+	/* If we haven't posted the open event yet, post an open */
+	if (!channel->scid || !channel->remote_channel_ready) {
+		u32 blkh;
+		/* Blockheight will be zero if it's not in chain */
+		blkh = wallet_transaction_height(channel->peer->ld->wallet,
+						 &channel->funding.txid);
+		channel_record_open(channel, blkh, true);
+	}
+
 
 	/* We could come from almost any state. */
 	/* NOTE(mschmoock) above comment is wrong, since we failed above! */
@@ -612,14 +641,14 @@ enum watch_result onchaind_funding_spent(struct channel *channel,
 			  channel->state,
 			  FUNDING_SPEND_SEEN,
 			  reason,
-			  "Onchain funding spend");
+			  tal_fmt(tmpctx, "Onchain funding spend"));
 
 	hsmfd = hsm_get_client_fd(ld, &channel->peer->id,
 				  channel->dbid,
 				  HSM_CAP_SIGN_ONCHAIN_TX
 				  | HSM_CAP_COMMITMENT_POINT);
 
-	channel_set_owner(channel, new_channel_subd(ld,
+	channel_set_owner(channel, new_channel_subd(channel, ld,
 						    "lightning_onchaind",
 						    channel,
 						    &channel->peer->id,
@@ -653,8 +682,17 @@ enum watch_result onchaind_funding_spent(struct channel *channel,
 			   channel->final_key_idx);
 		return KEEP_WATCHING;
 	}
-	/* This could be a mutual close, but it doesn't matter. */
-	bitcoin_txid(channel->last_tx, &our_last_txid);
+
+	/* This could be a mutual close, but it doesn't matter.
+	 * We don't need this for stub channels as well */
+	if (!is_stub_scid(channel->scid))
+		bitcoin_txid(channel->last_tx, &our_last_txid);
+	else
+	/* Dummy txid for stub channel to make valgrind happy. */
+		bitcoin_txid_from_hex("80cea306607b708a03a1854520729d"
+				"a884e4317b7b51f3d4a622f88176f5e034",
+				64,
+				&our_last_txid);
 
 	/* We try to get the feerate for each transaction type, 0 if estimation
 	 * failed. */
@@ -667,10 +705,10 @@ enum watch_result onchaind_funding_spent(struct channel *channel,
 		if (!feerates[i]) {
 			/* We have at least one data point: the last tx's feerate. */
 			struct amount_sat fee = channel->funding_sats;
-			for (size_t i = 0;
-			     i < channel->last_tx->wtx->num_outputs; i++) {
+			for (size_t j = 0;
+			     j < channel->last_tx->wtx->num_outputs; j++) {
 				struct amount_asset asset =
-					bitcoin_tx_output_get_amount(channel->last_tx, i);
+					bitcoin_tx_output_get_amount(channel->last_tx, j);
 				struct amount_sat amt;
 				assert(amount_asset_is_main(&asset));
 				amt = amount_asset_to_sat(&asset);
@@ -692,6 +730,9 @@ enum watch_result onchaind_funding_spent(struct channel *channel,
 				feerates[i] = feerate_floor();
 		}
 	}
+	/* This is 10x highest bitcoind estimate (depending on dev-max-fee-multiplier),
+	 * so cap at 2x */
+	feerates[3] = feerate_max(ld, NULL) / 5;
 
 	log_debug(channel->log, "channel->static_remotekey_start[LOCAL] %"PRIu64,
 		  channel->static_remotekey_start[LOCAL]);
@@ -711,8 +752,8 @@ enum watch_result onchaind_funding_spent(struct channel *channel,
 				    * we specify theirs. */
 				  channel->channel_info.their_config.to_self_delay,
 				  channel->our_config.to_self_delay,
-				  /* delayed_to_us, htlc, and penalty. */
-				  feerates[0], feerates[1], feerates[2],
+				  /* delayed_to_us, htlc, penalty, and penalty_max. */
+				  feerates[0], feerates[1], feerates[2], feerates[3],
 				  channel->our_config.dust_limit,
 				  &our_last_txid,
 				  channel->shutdown_scriptpubkey[LOCAL],

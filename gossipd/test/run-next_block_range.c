@@ -26,28 +26,6 @@ bool blinding_next_pubkey(const struct pubkey *pk UNNEEDED,
 			  const struct sha256 *h UNNEEDED,
 			  struct pubkey *next UNNEEDED)
 { fprintf(stderr, "blinding_next_pubkey called!\n"); abort(); }
-/* Generated stub for ecdh */
-void ecdh(const struct pubkey *point UNNEEDED, struct secret *ss UNNEEDED)
-{ fprintf(stderr, "ecdh called!\n"); abort(); }
-/* Generated stub for json_add_member */
-void json_add_member(struct json_stream *js UNNEEDED,
-		     const char *fieldname UNNEEDED,
-		     bool quote UNNEEDED,
-		     const char *fmt UNNEEDED, ...)
-{ fprintf(stderr, "json_add_member called!\n"); abort(); }
-/* Generated stub for json_member_direct */
-char *json_member_direct(struct json_stream *js UNNEEDED,
-			 const char *fieldname UNNEEDED, size_t extra UNNEEDED)
-{ fprintf(stderr, "json_member_direct called!\n"); abort(); }
-/* Generated stub for json_object_end */
-void json_object_end(struct json_stream *js UNNEEDED)
-{ fprintf(stderr, "json_object_end called!\n"); abort(); }
-/* Generated stub for json_object_start */
-void json_object_start(struct json_stream *ks UNNEEDED, const char *fieldname UNNEEDED)
-{ fprintf(stderr, "json_object_start called!\n"); abort(); }
-/* Generated stub for new_onionreply */
-struct onionreply *new_onionreply(const tal_t *ctx UNNEEDED, const u8 *contents TAKES UNNEEDED)
-{ fprintf(stderr, "new_onionreply called!\n"); abort(); }
 /* Generated stub for new_reltimer_ */
 struct oneshot *new_reltimer_(struct timers *timers UNNEEDED,
 			      const tal_t *ctx UNNEEDED,
@@ -59,16 +37,17 @@ bool query_channel_range(struct daemon *daemon UNNEEDED,
 			 struct peer *peer UNNEEDED,
 			 u32 first_blocknum UNNEEDED, u32 number_of_blocks UNNEEDED,
 			 enum query_option_flags qflags UNNEEDED,
-			 void (*cb)(struct peer *peer UNNEEDED,
-				    u32 first_blocknum UNNEEDED, u32 number_of_blocks UNNEEDED,
-				    const struct range_query_reply *replies))
+			 void (*cb)(struct peer *peer_ UNNEEDED,
+				    u32 first_blocknum_ UNNEEDED,
+				    u32 number_of_blocks_ UNNEEDED,
+				    const struct range_query_reply *replies_))
 { fprintf(stderr, "query_channel_range called!\n"); abort(); }
 /* Generated stub for query_short_channel_ids */
 bool query_short_channel_ids(struct daemon *daemon UNNEEDED,
 			     struct peer *peer UNNEEDED,
 			     const struct short_channel_id *scids UNNEEDED,
 			     const u8 *query_flags UNNEEDED,
-			     void (*cb)(struct peer *peer UNNEEDED, bool complete))
+			     void (*cb)(struct peer *peer_ UNNEEDED, bool complete))
 { fprintf(stderr, "query_short_channel_ids called!\n"); abort(); }
 /* Generated stub for queue_peer_msg */
 void queue_peer_msg(struct peer *peer UNNEEDED, const u8 *msg TAKES UNNEEDED)
