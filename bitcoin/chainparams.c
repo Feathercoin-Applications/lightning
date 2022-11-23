@@ -258,6 +258,7 @@ const struct chainparams networks[] = {
      .cli_min_supported_version = 150000,
      .dust_limit = { 546 },
      .max_funding = AMOUNT_SAT_INIT(((1 << 24) - 1)),
+     .max_supply = AMOUNT_SAT_INIT(2100000000000000),
      .max_payment = AMOUNT_MSAT_INIT(60 * 0xFFFFFFFFULL),
      .when_lightning_became_cool = 4087000,
      .p2pkh_version = 0x14,
@@ -285,6 +286,7 @@ const struct chainparams networks[] = {
      .dust_limit = { 100000 },
      .max_funding = AMOUNT_SAT_INIT(60 * ((1 << 24) - 1)),
      .max_payment = AMOUNT_MSAT_INIT(60 * 0xFFFFFFFFULL),
+     .max_supply = AMOUNT_SAT_INIT(2100000000000000),
      .when_lightning_became_cool = 1,
      .p2pkh_version = 111,
      .p2sh_version = 58,
@@ -292,8 +294,7 @@ const struct chainparams networks[] = {
      .fee_asset_tag = NULL,
      .bip32_key_version = {.bip32_pubkey_version = BIP32_VER_TEST_PUBLIC,
 			   .bip32_privkey_version = BIP32_VER_TEST_PRIVATE},
-     .is_elements = false},
-
+     .is_elements = false}
 };
 
 const struct chainparams *chainparams_for_network(const char *network_name)
