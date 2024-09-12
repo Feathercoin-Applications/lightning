@@ -295,6 +295,7 @@ const struct chainparams networks[] = {
      .testnet = true,
      .fee_asset_tag = NULL,
      .bip32_key_version = {.bip32_pubkey_version = BIP32_VER_TEST_PUBLIC,
+			   .bip32_privkey_version = BIP32_VER_TEST_PRIVATE},
      .is_elements = false}
 
 };
