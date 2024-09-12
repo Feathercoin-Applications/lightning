@@ -29,7 +29,9 @@ Core Lightning Documentation
    :maxdepth: 1
    :caption: Manpages
 
+ .. block_start manpages
    lightning-addgossip <lightning-addgossip.7.md>
+   lightning-autoclean-once <lightning-autoclean-once.7.md>
    lightning-autoclean-status <lightning-autoclean-status.7.md>
    lightning-batching <lightning-batching.7.md>
    lightning-bkpr-channelsapy <lightning-bkpr-channelsapy.7.md>
@@ -42,8 +44,8 @@ Core Lightning Documentation
    lightning-checkmessage <lightning-checkmessage.7.md>
    lightning-cli <lightning-cli.1.md>
    lightning-close <lightning-close.7.md>
-   lightning-commando <lightning-commando.7.md>
    lightning-commando-rune <lightning-commando-rune.7.md>
+   lightning-commando <lightning-commando.7.md>
    lightning-connect <lightning-connect.7.md>
    lightning-createinvoice <lightning-createinvoice.7.md>
    lightning-createonion <lightning-createonion.7.md>
@@ -83,8 +85,10 @@ Core Lightning Documentation
    lightning-listnodes <lightning-listnodes.7.md>
    lightning-listoffers <lightning-listoffers.7.md>
    lightning-listpays <lightning-listpays.7.md>
+   lightning-listpeerchannels <lightning-listpeerchannels.7.md>
    lightning-listpeers <lightning-listpeers.7.md>
    lightning-listsendpays <lightning-listsendpays.7.md>
+   lightning-listsqlschemas <lightning-listsqlschemas.7.md>
    lightning-listtransactions <lightning-listtransactions.7.md>
    lightning-makesecret <lightning-makesecret.7.md>
    lightning-multifundchannel <lightning-multifundchannel.7.md>
@@ -92,7 +96,6 @@ Core Lightning Documentation
    lightning-newaddr <lightning-newaddr.7.md>
    lightning-notifications <lightning-notifications.7.md>
    lightning-offer <lightning-offer.7.md>
-   lightning-offerout <lightning-offerout.7.md>
    lightning-openchannel_abort <lightning-openchannel_abort.7.md>
    lightning-openchannel_bump <lightning-openchannel_bump.7.md>
    lightning-openchannel_init <lightning-openchannel_init.7.md>
@@ -102,6 +105,8 @@ Core Lightning Documentation
    lightning-pay <lightning-pay.7.md>
    lightning-ping <lightning-ping.7.md>
    lightning-plugin <lightning-plugin.7.md>
+   lightning-preapproveinvoice <lightning-preapproveinvoice.7.md>
+   lightning-preapprovekeysend <lightning-preapprovekeysend.7.md>
    lightning-recoverchannel <lightning-recoverchannel.7.md>
    lightning-reserveinputs <lightning-reserveinputs.7.md>
    lightning-sendcustommsg <lightning-sendcustommsg.7.md>
@@ -111,21 +116,25 @@ Core Lightning Documentation
    lightning-sendpay <lightning-sendpay.7.md>
    lightning-sendpsbt <lightning-sendpsbt.7.md>
    lightning-setchannel <lightning-setchannel.7.md>
-   lightning-setchannelfee <lightning-setchannelfee.7.md>
+   lightning-signinvoice <lightning-signinvoice.7.md>
    lightning-signmessage <lightning-signmessage.7.md>
    lightning-signpsbt <lightning-signpsbt.7.md>
+   lightning-sql <lightning-sql.7.md>
    lightning-staticbackup <lightning-staticbackup.7.md>
    lightning-stop <lightning-stop.7.md>
    lightning-txdiscard <lightning-txdiscard.7.md>
    lightning-txprepare <lightning-txprepare.7.md>
    lightning-txsend <lightning-txsend.7.md>
    lightning-unreserveinputs <lightning-unreserveinputs.7.md>
+   lightning-upgradewallet <lightning-upgradewallet.7.md>
    lightning-utxopsbt <lightning-utxopsbt.7.md>
    lightning-waitanyinvoice <lightning-waitanyinvoice.7.md>
    lightning-waitblockheight <lightning-waitblockheight.7.md>
    lightning-waitinvoice <lightning-waitinvoice.7.md>
    lightning-waitsendpay <lightning-waitsendpay.7.md>
    lightning-withdraw <lightning-withdraw.7.md>
-   lightningd <lightningd.8.md>
    lightningd-config <lightningd-config.5.md>
    lightningd-rpc <lightningd-rpc.7.md>
+   lightningd <lightningd.8.md>
+   reckless <reckless.7.md>
+.. block_end manpages

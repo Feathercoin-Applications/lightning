@@ -120,8 +120,8 @@ def test_max_channel_id(node_factory, bitcoind):
     l2.wait_for_channel_onchain(l1.info['id'])
 
     bitcoind.generate_block(101)
-    wait_for(lambda: only_one(l1.rpc.listpeers()['peers'])['channels'] == [])
-    wait_for(lambda: only_one(l2.rpc.listpeers()['peers'])['channels'] == [])
+    wait_for(lambda: l1.rpc.listpeerchannels()['channels'] == [])
+    wait_for(lambda: l2.rpc.listpeerchannels()['channels'] == [])
 
     # Stop l2, and restart
     l2.stop()
@@ -507,6 +507,9 @@ def test_db_forward_migrate(bitcoind, node_factory):
 
     assert l1.rpc.getinfo()['fees_collected_msat'] == 4
     assert len(l1.rpc.listforwards()['forwards']) == 4
+
+    # The two null in_htlc_id are replaced with bogus entries!
+    assert sum([f['in_htlc_id'] > 0xFFFFFFFFFFFF for f in l1.rpc.listforwards()['forwards']]) == 2
 
     # Make sure autoclean can handle these!
     l1.stop()

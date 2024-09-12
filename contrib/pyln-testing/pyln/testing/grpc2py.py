@@ -185,6 +185,7 @@ def listpeers_peers2py(m):
     return remove_default({
         "id": hexlify(m.id),  # PrimitiveField in generate_composite
         "connected": m.connected,  # PrimitiveField in generate_composite
+        "num_channels": m.num_channels,  # PrimitiveField in generate_composite
         "log": [listpeers_peers_log2py(i) for i in m.log],  # ArrayField[composite] in generate_composite
         "channels": [listpeers_peers_channels2py(i) for i in m.channels],  # ArrayField[composite] in generate_composite
         "netaddr": [m.netaddr for i in m.netaddr], # ArrayField[primitive] in generate_composite
@@ -258,6 +259,7 @@ def listchannels_channels2py(m):
         "source": hexlify(m.source),  # PrimitiveField in generate_composite
         "destination": hexlify(m.destination),  # PrimitiveField in generate_composite
         "short_channel_id": m.short_channel_id,  # PrimitiveField in generate_composite
+        "direction": m.direction,  # PrimitiveField in generate_composite
         "public": m.public,  # PrimitiveField in generate_composite
         "amount_msat": amount2msat(m.amount_msat),  # PrimitiveField in generate_composite
         "message_flags": m.message_flags,  # PrimitiveField in generate_composite
@@ -464,6 +466,7 @@ def listsendpays_payments2py(m):
     return remove_default({
         "id": m.id,  # PrimitiveField in generate_composite
         "groupid": m.groupid,  # PrimitiveField in generate_composite
+        "partid": m.partid,  # PrimitiveField in generate_composite
         "payment_hash": hexlify(m.payment_hash),  # PrimitiveField in generate_composite
         "status": str(m.status),  # EnumField in generate_composite
         "amount_msat": amount2msat(m.amount_msat),  # PrimitiveField in generate_composite
@@ -511,8 +514,6 @@ def listtransactions_transactions2py(m):
         "rawtx": hexlify(m.rawtx),  # PrimitiveField in generate_composite
         "blockheight": m.blockheight,  # PrimitiveField in generate_composite
         "txindex": m.txindex,  # PrimitiveField in generate_composite
-        "type": [str(i) for i in m.type],  # ArrayField[composite] in generate_composite
-        "channel": m.channel,  # PrimitiveField in generate_composite
         "locktime": m.locktime,  # PrimitiveField in generate_composite
         "version": m.version,  # PrimitiveField in generate_composite
         "inputs": [listtransactions_transactions_inputs2py(i) for i in m.inputs],  # ArrayField[composite] in generate_composite
@@ -851,6 +852,12 @@ def ping2py(m):
     })
 
 
+def sendcustommsg2py(m):
+    return remove_default({
+        "status": m.status,  # PrimitiveField in generate_composite
+    })
+
+
 def setchannel_channels2py(m):
     return remove_default({
         "peer_id": hexlify(m.peer_id),  # PrimitiveField in generate_composite
@@ -868,6 +875,12 @@ def setchannel_channels2py(m):
 def setchannel2py(m):
     return remove_default({
         "channels": [setchannel_channels2py(i) for i in m.channels],  # ArrayField[composite] in generate_composite
+    })
+
+
+def signinvoice2py(m):
+    return remove_default({
+        "bolt11": m.bolt11,  # PrimitiveField in generate_composite
     })
 
 

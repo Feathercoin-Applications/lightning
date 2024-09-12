@@ -3,6 +3,7 @@ from decimal import Decimal
 from fixtures import *  # noqa: F401,F403
 from fixtures import TEST_NETWORK
 from pyln.client import RpcError, Millisatoshi
+from shutil import copyfile
 from utils import (
     only_one, wait_for, sync_blockheight, EXPERIMENTAL_FEATURES,
     VALGRIND, check_coin_moves, TailableProc, scriptpubkey_addr,
@@ -62,7 +63,7 @@ def test_withdraw(node_factory, bitcoind):
 
     # Side note: sendrawtransaction will trace back to withdrawl
     myname = os.path.splitext(os.path.basename(sys.argv[0]))[0]
-    l1.daemon.wait_for_log(r": {}:withdraw#[0-9]*/cln:withdraw#[0-9]*/txprepare:sendpsbt#[0-9]*/cln:sendrawtransaction#[0-9]*\[OUT\]".format(myname))
+    l1.daemon.wait_for_log(r': "{}:withdraw#[0-9]*/cln:withdraw#[0-9]*/txprepare:sendpsbt#[0-9]*/cln:sendrawtransaction#[0-9]*"\[OUT\]'.format(myname))
 
     # Make sure bitcoind received the withdrawal
     unspent = l1.bitcoin.rpc.listunspent(0)
@@ -292,11 +293,9 @@ def test_txprepare(node_factory, bitcoind, chainparams):
     l1 = node_factory.get_node(random_hsm=True)
     addr = chainparams['example_addr']
 
-    # Add some funds to withdraw later: both bech32 and p2sh
-    for i in range(5):
+    # Add some funds to withdraw later
+    for i in range(10):
         bitcoind.rpc.sendtoaddress(l1.rpc.newaddr()['bech32'],
-                                   amount / 10**8)
-        bitcoind.rpc.sendtoaddress(l1.rpc.newaddr('p2sh-segwit')['p2sh-segwit'],
                                    amount / 10**8)
 
     bitcoind.generate_block(1)
@@ -448,12 +447,9 @@ def test_reserveinputs(node_factory, bitcoind, chainparams):
     l1 = node_factory.get_node(feerates=(7500, 7500, 7500, 7500))
 
     outputs = []
-    # Add a medley of funds to withdraw later, bech32 + p2sh-p2wpkh
-    for i in range(total_outs // 2):
+    # Add a medley of funds to withdraw
+    for i in range(total_outs):
         txid = bitcoind.rpc.sendtoaddress(l1.rpc.newaddr()['bech32'],
-                                          amount / 10**8)
-        outputs.append((txid, bitcoind.rpc.gettransaction(txid)['details'][0]['vout']))
-        txid = bitcoind.rpc.sendtoaddress(l1.rpc.newaddr('p2sh-segwit')['p2sh-segwit'],
                                           amount / 10**8)
         outputs.append((txid, bitcoind.rpc.gettransaction(txid)['details'][0]['vout']))
 
@@ -504,12 +500,9 @@ def test_fundpsbt(node_factory, bitcoind, chainparams):
     l1 = node_factory.get_node()
 
     outputs = []
-    # Add a medley of funds to withdraw later, bech32 + p2sh-p2wpkh
-    for i in range(total_outs // 2):
+    # Add a medley of funds to withdraw later
+    for i in range(total_outs):
         txid = bitcoind.rpc.sendtoaddress(l1.rpc.newaddr()['bech32'],
-                                          amount / 10**8)
-        outputs.append((txid, bitcoind.rpc.gettransaction(txid)['details'][0]['vout']))
-        txid = bitcoind.rpc.sendtoaddress(l1.rpc.newaddr('p2sh-segwit')['p2sh-segwit'],
                                           amount / 10**8)
         outputs.append((txid, bitcoind.rpc.gettransaction(txid)['details'][0]['vout']))
 
@@ -589,13 +582,11 @@ def test_utxopsbt(node_factory, bitcoind, chainparams):
     l1 = node_factory.get_node()
 
     outputs = []
-    # Add a medley of funds to withdraw later, bech32 + p2sh-p2wpkh
-    txid = bitcoind.rpc.sendtoaddress(l1.rpc.newaddr()['bech32'],
-                                      amount / 10**8)
-    outputs.append((txid, bitcoind.rpc.gettransaction(txid)['details'][0]['vout']))
-    txid = bitcoind.rpc.sendtoaddress(l1.rpc.newaddr('p2sh-segwit')['p2sh-segwit'],
-                                      amount / 10**8)
-    outputs.append((txid, bitcoind.rpc.gettransaction(txid)['details'][0]['vout']))
+    # Add a funds to withdraw later
+    for _ in range(2):
+        txid = bitcoind.rpc.sendtoaddress(l1.rpc.newaddr()['bech32'],
+                                          amount / 10**8)
+        outputs.append((txid, bitcoind.rpc.gettransaction(txid)['details'][0]['vout']))
 
     bitcoind.generate_block(1)
     wait_for(lambda: len(l1.rpc.listfunds()['outputs']) == len(outputs))
@@ -709,11 +700,10 @@ def test_sign_external_psbt(node_factory, bitcoind, chainparams):
     amount = 1000000
     total_outs = 4
 
-    # Add a medley of funds to withdraw later, bech32 + p2sh-p2wpkh
-    for i in range(total_outs // 2):
+    # Add a medley of funds to withdraw later
+    for i in range(total_outs):
         bitcoind.rpc.sendtoaddress(l1.rpc.newaddr()['bech32'],
                                    amount / 10**8)
-        bitcoind.rpc.sendtoaddress(l1.rpc.newaddr('p2sh-segwit')['p2sh-segwit'], amount / 10**8)
 
     bitcoind.generate_block(1)
     wait_for(lambda: len(l1.rpc.listfunds()['outputs']) == total_outs)
@@ -742,11 +732,9 @@ def test_sign_and_send_psbt(node_factory, bitcoind, chainparams):
     addr = chainparams['example_addr']
     out_total = Millisatoshi(amount * 3 * 1000)
 
-    # Add a medley of funds to withdraw later, bech32 + p2sh-p2wpkh
-    for i in range(total_outs // 2):
+    # Add a medley of funds to withdraw later
+    for i in range(total_outs):
         bitcoind.rpc.sendtoaddress(l1.rpc.newaddr()['bech32'],
-                                   amount / 10**8)
-        bitcoind.rpc.sendtoaddress(l1.rpc.newaddr('p2sh-segwit')['p2sh-segwit'],
                                    amount / 10**8)
     bitcoind.generate_block(1)
     wait_for(lambda: len(l1.rpc.listfunds()['outputs']) == total_outs)
@@ -808,10 +796,8 @@ def test_sign_and_send_psbt(node_factory, bitcoind, chainparams):
         l1.rpc.signpsbt(fullpsbt)
 
     # Queue up another node, to make some PSBTs for us
-    for i in range(total_outs // 2):
+    for i in range(total_outs):
         bitcoind.rpc.sendtoaddress(l2.rpc.newaddr()['bech32'],
-                                   amount / 10**8)
-        bitcoind.rpc.sendtoaddress(l2.rpc.newaddr('p2sh-segwit')['p2sh-segwit'],
                                    amount / 10**8)
     # Create a PSBT using L2
     bitcoind.generate_block(1)
@@ -928,11 +914,9 @@ def test_txsend(node_factory, bitcoind, chainparams):
     l1 = node_factory.get_node(random_hsm=True)
     addr = chainparams['example_addr']
 
-    # Add some funds to withdraw later: both bech32 and p2sh
-    for i in range(5):
+    # Add some funds to withdraw later
+    for i in range(10):
         bitcoind.rpc.sendtoaddress(l1.rpc.newaddr()['bech32'],
-                                   amount / 10**8)
-        bitcoind.rpc.sendtoaddress(l1.rpc.newaddr('p2sh-segwit')['p2sh-segwit'],
                                    amount / 10**8)
     bitcoind.generate_block(1)
     wait_for(lambda: len(l1.rpc.listfunds()['outputs']) == 10)
@@ -1033,9 +1017,9 @@ def test_transaction_annotations(node_factory, bitcoind):
     assert(types[changeidx] == 'deposit' and types[fundidx] == 'channel_funding')
 
     # And check the channel annotation on the funding output
-    peers = l1.rpc.listpeers()['peers']
-    assert(len(peers) == 1 and len(peers[0]['channels']) == 1)
-    scid = peers[0]['channels'][0]['short_channel_id']
+    channels = l1.rpc.listpeerchannels()['channels']
+    assert(len(channels) == 1)
+    scid = channels[0]['short_channel_id']
     assert(txs[1]['outputs'][fundidx]['channel'] == scid)
 
 
@@ -1513,3 +1497,59 @@ def test_withdraw_bech32m(node_factory, bitcoind):
     for addr in addrs:
         args += [{addr: 10**3}]
     l1.rpc.multiwithdraw(args)["txid"]
+
+
+@unittest.skipIf(TEST_NETWORK != 'regtest', "Address is network specific")
+def test_upgradewallet(node_factory, bitcoind):
+    # Make sure bitcoind doesn't think it's going backwards
+    bitcoind.generate_block(104)
+    l1 = node_factory.get_node(start=False)
+
+    # Write the data/p2sh_wallet_hsm_secret to the hsm_path,
+    # so node can spend funds at p2sh_wrapped_addr
+    p2sh_wrapped_addr = '2N2V4ee2vMkiXe5FSkRqFjQhiS9hKqNytv3'
+    hsm_path_dest = os.path.join(l1.daemon.lightning_dir, TEST_NETWORK, "hsm_secret")
+    hsm_path_origin = os.path.join('tests/data', 'p2sh_wallet_hsm_secret')
+    copyfile(hsm_path_origin, hsm_path_dest)
+
+    l1.start()
+    assert l1.daemon.is_in_log('Server started with public key 0266e4598d1d3c415f572a8488830b60f7e744ed9235eb0b1ba93283b315c03518')
+
+    # No funds in wallet, upgrading does nothing
+    upgrade = l1.rpc.upgradewallet()
+    assert upgrade['upgraded_outs'] == 0
+
+    l1.fundwallet(10000000, addrtype="bech32")
+
+    # Funds are in wallet but they're already native segwit
+    upgrade = l1.rpc.upgradewallet()
+    assert upgrade['upgraded_outs'] == 0
+
+    # Send funds to wallet-compatible p2sh-segwit funds
+    txid = bitcoind.rpc.sendtoaddress(p2sh_wrapped_addr, 20000000 / 10 ** 8)
+    bitcoind.generate_block(1)
+    l1.daemon.wait_for_log('Owning output .* txid {} CONFIRMED'.format(txid))
+
+    upgrade = l1.rpc.upgradewallet()
+    assert upgrade['upgraded_outs'] == 1
+    assert bitcoind.rpc.getmempoolinfo()['size'] == 1
+
+    # Should be reserved!
+    res_funds = only_one([out for out in l1.rpc.listfunds()['outputs'] if out['reserved']])
+    assert 'redeemscript' in res_funds
+
+    # Running it again should be no-op because reservedok is false
+    upgrade = l1.rpc.upgradewallet()
+    assert upgrade['upgraded_outs'] == 0
+
+    # Doing it with 'reserved ok' should have 1
+    # We use a big feerate so we can get over the RBF hump
+    upgrade = l1.rpc.upgradewallet(feerate="max_acceptable", reservedok=True)
+    assert upgrade['upgraded_outs'] == 1
+    assert bitcoind.rpc.getmempoolinfo()['size'] == 1
+
+    # Mine it, nothing to upgrade
+    l1.bitcoin.generate_block(1)
+    sync_blockheight(l1.bitcoin, [l1])
+    upgrade = l1.rpc.upgradewallet(feerate="max_acceptable", reservedok=True)
+    assert upgrade['upgraded_outs'] == 0

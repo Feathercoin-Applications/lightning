@@ -50,6 +50,7 @@ msgdata,connectd_connect_to_peer,id,node_id,
 msgdata,connectd_connect_to_peer,len,u32,
 msgdata,connectd_connect_to_peer,addrs,wireaddr,len
 msgdata,connectd_connect_to_peer,addrhint,?wireaddr_internal,
+msgdata,connectd_connect_to_peer,dns_fallback,bool,
 
 # Connectd->master: connect failed.
 msgtype,connectd_connect_failed,2020
@@ -142,6 +143,12 @@ msgtype,connectd_custommsg_out,2011
 msgdata,connectd_custommsg_out,id,node_id,
 msgdata,connectd_custommsg_out,msg_len,u16,
 msgdata,connectd_custommsg_out,msg,u8,msg_len
+
+# master -> connectd: we're shutting down, no new connections.
+msgtype,connectd_start_shutdown,2031
+
+# connect - >master: acknowledged.
+msgtype,connectd_start_shutdown_reply,2131
 
 # master -> connect: stop sending gossip.
 msgtype,connectd_dev_suppress_gossip,2032

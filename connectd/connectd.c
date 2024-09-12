@@ -47,6 +47,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <wire/wire_io.h>
 #include <wire/wire_sync.h>
 
 /*~ We are passed two file descriptors when exec'ed from `lightningd`: the
@@ -208,7 +209,7 @@ void destroy_peer(struct peer *peer)
 {
 	assert(!peer->draining);
 
-	if (!peer_htable_del(&peer->daemon->peers, peer))
+	if (!peer_htable_del(peer->daemon->peers, peer))
 		abort();
 
 	/* Tell gossipd to stop asking this peer gossip queries */
@@ -257,7 +258,7 @@ static struct peer *new_peer(struct daemon *daemon,
 
 	/* Now we own it */
 	tal_steal(peer, peer->to_peer);
-	peer_htable_add(&daemon->peers, peer);
+	peer_htable_add(daemon->peers, peer);
 	tal_add_destructor(peer, destroy_peer);
 
 	return peer;
@@ -282,7 +283,7 @@ struct io_plan *peer_connected(struct io_conn *conn,
 	bool option_gossip_queries;
 
 	/* We remove any previous connection immediately, on the assumption it's dead */
-	peer = peer_htable_get(&daemon->peers, id);
+	peer = peer_htable_get(daemon->peers, id);
 	if (peer)
 		tal_free(peer);
 
@@ -305,8 +306,8 @@ struct io_plan *peer_connected(struct io_conn *conn,
 		status_peer_unusual(id, "Unsupported feature %u", unsup);
 		msg = towire_warningfmt(NULL, NULL, "Unsupported feature %u",
 					unsup);
-		msg = cryptomsg_encrypt_msg(tmpctx, cs, take(msg));
-		return io_write(conn, msg, tal_count(msg), io_close_cb, NULL);
+		msg = cryptomsg_encrypt_msg(NULL, cs, take(msg));
+		return io_write_wire(conn, take(msg), io_close_cb, NULL);
 	}
 
 	if (!feature_check_depends(their_features, &depender, &missing)) {
@@ -315,8 +316,8 @@ struct io_plan *peer_connected(struct io_conn *conn,
 		msg = towire_warningfmt(NULL, NULL,
 				      "Feature %zu requires feature %zu",
 				      depender, missing);
-		msg = cryptomsg_encrypt_msg(tmpctx, cs, take(msg));
-		return io_write(conn, msg, tal_count(msg), io_close_cb, NULL);
+		msg = cryptomsg_encrypt_msg(NULL, cs, take(msg));
+		return io_write_wire(conn, take(msg), io_close_cb, NULL);
 	}
 
 	/* We've successfully connected. */
@@ -1567,11 +1568,13 @@ static void connect_activate(struct daemon *daemon, const u8 *msg)
 						 strerror(errno));
 				break;
 			}
-			notleak(io_new_listener(daemon,
-						daemon->listen_fds[i]->fd,
-						get_in_cb(daemon->listen_fds[i]
-							  ->is_websocket),
-						daemon));
+			/* Add to listeners array */
+			tal_arr_expand(&daemon->listeners,
+				       io_new_listener(daemon->listeners,
+						       daemon->listen_fds[i]->fd,
+						       get_in_cb(daemon->listen_fds[i]
+								 ->is_websocket),
+						       daemon));
 		}
 	}
 
@@ -1716,14 +1719,15 @@ static void add_gossip_addrs(struct wireaddr_internal **addrs,
 static void try_connect_peer(struct daemon *daemon,
 			     const struct node_id *id,
 			     struct wireaddr *gossip_addrs,
-			     struct wireaddr_internal *addrhint STEALS)
+			     struct wireaddr_internal *addrhint STEALS,
+			     bool dns_fallback)
 {
 	struct wireaddr_internal *addrs;
 	bool use_proxy = daemon->always_use_proxy;
 	struct connecting *connect;
 
 	/* Already existing?  Must have crossed over, it'll know soon. */
-	if (peer_htable_get(&daemon->peers, id))
+	if (peer_htable_get(daemon->peers, id))
 		return;
 
 	/* If we're trying to connect it right now, that's OK. */
@@ -1762,7 +1766,7 @@ static void try_connect_peer(struct daemon *daemon,
 				                         chainparams_get_ln_port(chainparams));
 				tal_arr_expand(&addrs, unresolved);
 			}
-		} else if (daemon->use_dns) {
+		} else if (daemon->use_dns && dns_fallback) {
 			add_seed_addrs(&addrs, id,
 			               daemon->broken_resolver_response);
 		}
@@ -1804,12 +1808,14 @@ static void connect_to_peer(struct daemon *daemon, const u8 *msg)
 	struct node_id id;
 	struct wireaddr_internal *addrhint;
 	struct wireaddr *addrs;
+	bool dns_fallback;
 
 	if (!fromwire_connectd_connect_to_peer(tmpctx, msg,
-					       &id, &addrs, &addrhint))
+					       &id, &addrs, &addrhint,
+					       &dns_fallback))
 		master_badmsg(WIRE_CONNECTD_CONNECT_TO_PEER, msg);
 
-	try_connect_peer(daemon, &id, addrs, addrhint);
+	try_connect_peer(daemon, &id, addrs, addrhint, dns_fallback);
 }
 
 /* lightningd tells us a peer should be disconnected. */
@@ -1824,7 +1830,7 @@ static void peer_discard(struct daemon *daemon, const u8 *msg)
 
 	/* We should stay in sync with lightningd, but this can happen
 	 * under stress. */
-	peer = peer_htable_get(&daemon->peers, &id);
+	peer = peer_htable_get(daemon->peers, &id);
 	if (!peer)
 		return;
 	/* If it's reconnected already, it will learn soon. */
@@ -1832,6 +1838,20 @@ static void peer_discard(struct daemon *daemon, const u8 *msg)
 		return;
 	status_peer_debug(&id, "discard_peer");
 	tal_free(peer);
+}
+
+static void start_shutdown(struct daemon *daemon, const u8 *msg)
+{
+	if (!fromwire_connectd_start_shutdown(msg))
+		master_badmsg(WIRE_CONNECTD_START_SHUTDOWN, msg);
+
+	daemon->shutting_down = true;
+
+	/* No more incoming connections! */
+	daemon->listeners = tal_free(daemon->listeners);
+
+	daemon_conn_send(daemon->master,
+			 take(towire_connectd_start_shutdown_reply(NULL)));
 }
 
 /* lightningd tells us to send a msg and disconnect. */
@@ -1849,7 +1869,7 @@ static void peer_final_msg(struct io_conn *conn,
 
 	/* This can happen if peer hung up on us (or wrong counter
 	 * if it reconnected). */
-	peer = peer_htable_get(&daemon->peers, &id);
+	peer = peer_htable_get(daemon->peers, &id);
 	if (peer && peer->counter == counter)
 		multiplex_final_msg(peer, take(finalmsg));
 }
@@ -1865,7 +1885,7 @@ static void dev_connect_memleak(struct daemon *daemon, const u8 *msg)
 
 	/* Now delete daemon and those which it has pointers to. */
 	memleak_scan_obj(memtable, daemon);
-	memleak_scan_htable(memtable, &daemon->peers.raw);
+	memleak_scan_htable(memtable, &daemon->peers->raw);
 
 	found_leak = dump_memleak(memtable, memleak_status_broken);
 	daemon_conn_send(daemon->master,
@@ -1934,6 +1954,10 @@ static struct io_plan *recv_req(struct io_conn *conn,
 		return daemon_conn_read_with_fd(conn, daemon->master,
 						recv_peer_connect_subd, daemon);
 
+	case WIRE_CONNECTD_START_SHUTDOWN:
+		start_shutdown(daemon, msg);
+		goto out;
+
 	case WIRE_CONNECTD_DEV_MEMLEAK:
 #if DEVELOPER
 		dev_connect_memleak(daemon, msg);
@@ -1955,6 +1979,7 @@ static struct io_plan *recv_req(struct io_conn *conn,
 	case WIRE_CONNECTD_GOT_ONIONMSG_TO_US:
 	case WIRE_CONNECTD_CUSTOMMSG_IN:
 	case WIRE_CONNECTD_PEER_DISCONNECT_DONE:
+	case WIRE_CONNECTD_START_SHUTDOWN_REPLY:
 		break;
 	}
 
@@ -1992,7 +2017,7 @@ static struct io_plan *recv_gossip(struct io_conn *conn,
 		status_failed(STATUS_FAIL_GOSSIP_IO, "Unknown msg %i",
 			      fromwire_peektype(msg));
 
-	peer = peer_htable_get(&daemon->peers, &dst);
+	peer = peer_htable_get(daemon->peers, &dst);
 	if (peer)
 		inject_peer_msg(peer, take(gossip_msg));
 
@@ -2004,7 +2029,7 @@ static struct io_plan *recv_gossip(struct io_conn *conn,
 #if DEVELOPER
 static void memleak_daemon_cb(struct htable *memtable, struct daemon *daemon)
 {
-	memleak_scan_htable(memtable, &daemon->peers.raw);
+	memleak_scan_htable(memtable, &daemon->peers->raw);
 }
 #endif /* DEVELOPER */
 
@@ -2020,11 +2045,14 @@ int main(int argc, char *argv[])
 	/* Allocate and set up our simple top-level structure. */
 	daemon = tal(NULL, struct daemon);
 	daemon->connection_counter = 1;
-	peer_htable_init(&daemon->peers);
+	daemon->peers = tal(daemon, struct peer_htable);
+	daemon->listeners = tal_arr(daemon, struct io_listener *, 0);
+	peer_htable_init(daemon->peers);
 	memleak_add_helper(daemon, memleak_daemon_cb);
 	list_head_init(&daemon->connecting);
 	timers_init(&daemon->timers, time_mono());
 	daemon->gossip_store_fd = -1;
+	daemon->shutting_down = false;
 
 	/* stdin == control */
 	daemon->master = daemon_conn_new(daemon, STDIN_FILENO, recv_req, NULL,

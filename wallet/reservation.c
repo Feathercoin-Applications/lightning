@@ -434,29 +434,6 @@ static inline u32 minconf_to_maxheight(u32 minconf, struct lightningd *ld)
 	return ld->topology->tip->height - minconf + 1;
 }
 
-static struct command_result *param_reserve_num(struct command *cmd,
-						const char *name,
-						const char *buffer,
-						const jsmntok_t *tok,
-						unsigned int **num)
-{
-	bool flag;
-
-	if (deprecated_apis) {
-		/* "reserve=true" means 6 hours */
-		if (json_to_bool(buffer, tok, &flag)) {
-			*num = tal(cmd, unsigned int);
-			if (flag)
-				**num = RESERVATION_DEFAULT;
-			else
-				**num = 0;
-			return NULL;
-		}
-	}
-
-	return param_number(cmd, name, buffer, tok, num);
-}
-
 static struct command_result *json_fundpsbt(struct command *cmd,
 					      const char *buffer,
 					      const jsmntok_t *obj UNNEEDED,
@@ -466,7 +443,7 @@ static struct command_result *json_fundpsbt(struct command *cmd,
 	u32 *feerate_per_kw;
 	u32 *minconf, *weight, *min_witness_weight;
 	struct amount_sat *amount, input, diff;
-	bool all, *excess_as_change;
+	bool all, *excess_as_change, *nonwrapped;
 	u32 *locktime, *reserve, maxheight;
 
 	if (!param(cmd, buffer, params,
@@ -474,13 +451,15 @@ static struct command_result *json_fundpsbt(struct command *cmd,
 		   p_req("feerate", param_feerate, &feerate_per_kw),
 		   p_req("startweight", param_number, &weight),
 		   p_opt_def("minconf", param_number, &minconf, 1),
-		   p_opt_def("reserve", param_reserve_num, &reserve,
+		   p_opt_def("reserve", param_number, &reserve,
 			     RESERVATION_DEFAULT),
 		   p_opt("locktime", param_number, &locktime),
 		   p_opt_def("min_witness_weight", param_number,
 			     &min_witness_weight, 0),
 		   p_opt_def("excess_as_change", param_bool,
 			     &excess_as_change, false),
+		   p_opt_def("nonwrapped", param_bool,
+			     &nonwrapped, false),
 		   NULL))
 		return command_param_failed();
 
@@ -502,6 +481,7 @@ static struct command_result *json_fundpsbt(struct command *cmd,
 					&diff,
 					*feerate_per_kw,
 					maxheight,
+					*nonwrapped,
 					cast_const2(const struct utxo **, utxos));
 		if (utxo) {
 			utxo_weight = utxo_spend_weight(utxo,
@@ -655,7 +635,7 @@ static struct command_result *json_utxopsbt(struct command *cmd,
 		   p_req("feerate", param_feerate, &feerate_per_kw),
 		   p_req("startweight", param_number, &weight),
 		   p_req("utxos", param_txout, &utxos),
-		   p_opt_def("reserve", param_reserve_num, &reserve,
+		   p_opt_def("reserve", param_number, &reserve,
 			     RESERVATION_DEFAULT),
 		   p_opt_def("reservedok", param_bool, &reserved_ok, false),
 		   p_opt("locktime", param_number, &locktime),

@@ -1,62 +1,217 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-<!--
-TODO: Insert version codename, and username of the contributor that named the release.
--->
 
-## [22.11rc2] - 2022-11-18
+## [23.02] - 2023-03-01: "CBDC Backing Layer"
+
+This release named by @whitslack
+
+NOTE 1: This release contains breaking protocol changes to dual-funding and
+        offers, making them incompatible with previous releases.
+NOTE 2: Periodic pruning of channels now keeps track of them as 'zombies.' This
+        behavior is in line with the lightning specification but results in
+        fewer nodes and channels listed by `listnodes`/`listpeers`. These
+        channels will resume as soon as the missing side broadcasts a recent
+        channel update.
+
 
 ### Added
 
- - cli: new `--filter` parameter to reduce JSON output. ([#5681])
- - Documentation: `lightningd-rpc` manual page describes details of our JSON-RPC interface, including compatibility and filtering. ([#5681])
- - pyln: LightningRpc has new `reply_filter` context manager for reducing output of RPC commands. ([#5681])
- - JSON-RPC: `filter` object allows reduction of JSON response to (most) commands. ([#5681])
- - Reckless - a Core Lightning plugin manager ([#5647])
- - cln-plugin: Options are no longer required to have a default value ([#5369])
- - Added interactive transaction building routine ([#5287])
- - cln-rpc: `keysend` now exposes the `extratlvs` field ([#5674])
- - JSON-RPC: The `extratlvs` argument for `keysend` now allows quoting the type numbers in string ([#5674])
- - JSON-RPC: `makesecret` can take a string argument instead of hex. ([#5633])
- - Protocol: We now delay forgetting funding-spent channels for 12 blocks (as per latest BOLTs, to support splicing in future). ([#5592])
- - Protocol: We now set the `dont_forward` bit on private channel_update's message_flags (as per latest BOLTs). ([#5592])
- - JSON-RPC: `delpay` takes optional `groupid` and `partid` parameters to specify exactly what payment to delete. ([#5594])
- - JSON-RPC: `batching` command to allow database transactions to cross multiple back-to-back JSON commands. ([#5594])
- - Plugins: `autoclean-once` command for a single cleanup. ([#5594])
- - Plugins: `autoclean-status` command to see what autoclean is doing. ([#5594])
- - Plugins: `autoclean` can now delete old forwards, payments, and invoices automatically. ([#5594])
- - JSON-RPC: `delforward` command to delete listforwards entries. ([#5594])
- - JSON-RPC: `listhtlcs` new command to list all known HTLCS. ([#5594])
- - JSON-RPC: `listforwards` now shows `in_htlc_id` and `out_htlc_id` ([#5594])
- - Config: `accept-htlc-tlv-types` lets us accept unknown even HTLC TLV fields we would normally reject on parsing (was EXPERIMENTAL-only `experimental-accept-extra-tlv-types`). ([#5619])
- - JSON-RPC: `keysend` now has `extratlvs` option in non-EXPERIMENTAL builds. ([#5619])
- - Protocol: `keysend` will now attach the longest valid text field in the onion to the invoice (so you can have Sphinx.chat users spam you!) ([#5619])
- - plugin: The `openchannel` hook may return a custom absolute `reserve` value that the peer must not dip below. ([#5315])
- - JSON-RPC: `fundchannel`, `multifundchannel` and `fundchannel_start` now accept a `reserve` parameter to indicate the absolute reserve to impose on the peer. ([#5315])
- - Config: `--database-upgrade=true` required if a non-release version wants to (irrevocably!) upgrade the db. ([#5550])
- - Plugins: Added notification topic "block_processed". ([#5581])
- - JSON-RPC: `pay` and `listpays` now lists the completion time. ([#5398])
- - JSON-RPC: `channel_opened` notification `channel_ready` flag. ([#5490])
+ - Plugins: `sql` plugin command to perform server-side complex queries. ([#5679])
+ - JSON-RPC: `preapprovekeysend`: New command to preapprove payment details with an HSM. ([#5821])
+ - JSON-RPC: `preapproveinvoice`: New command to preapprove a BOLT11 invoice with an HSM. ([#5821])
+ - JSON-RPC: `listpeerchannels`: New command to return information on direct channels with our peers. ([#5825])
+ - JSON-RPC: `signinvoice`: New command to sign a BOLT11 invoice. ([#5697])
+ - JSON-RPC: `upgradewallet`: New command to sweep all p2sh-wrapped outputs to a native segwit output. ([#5670])
+ - JSON-RPC: `fundpsbt` option `nonwrapped` filters out p2sh wrapped inputs. ([#5670])
+ - JSON-RPC: `listpeers` output now has `num_channels` as `channels` is deprecated (see `listpeerchannels`). ([#5968])
+ - JSON-RPC: `listchannels` added a `direction` field (0 or 1) as per gossip specification. ([#5679])
+ - cli: `--commando=peerid:rune` (or `-c peerid:rune`) as convenient shortcut for running commando commands. ([#5866])
+ - Plugins: `commando` now supports `filter` as a parameter (for send and receive). ([#5866])
+ - Config: Added config option `announce-addr-discovered-port` to set custom port for IP discovery. ([#5842])
+ - Config: Added config switch `announce-addr-discovered`: on/off/auto ([#5841])
+ - doc: we now annotate what versions JSON field additions and deprecations happenened. ([#5867])
+ - SECURITY.md: Where to send sensitive bug reports, and dev GPG fingerprints. ([#5960])
 
 
 ### Changed
 
+ - JSON-RPC: `sendcustommsg` can now be called by a plugin from within the `peer_connected` hook. ([#5361])
+ - JSON-RPC: `getinfo` `address` array is always present (though may be empty.) ([#5904])
+ - postgres: Ordering of HTLCs in `listhtlcs` are now ordered by time of creation. ([#5863])
+
+
+### Deprecated
+
+Note: You should always set `allow-deprecated-apis=false` to test for changes.
+
+ - Config: The --disable-ip-discovery config switch: use `announce-addr-discovered`. ([#5841])
+ - JSON-RPC: `newaddr`: `addresstype` `p2sh-segwit` (use default, or `bech32`.) ([#5751])
+ - JSON-RPC: `listpeers` `channels` array: use `listpeerchannels`. ([#5825])
+ - plugins: `commando` JSON commands without an `id` (see doc/lightningd-rpc.7.md for how to construct a good id field). ([#5866])
+
+
+### Removed
+
+ - JSON-RPC: `sendpay` `route` argument `style` "legacy" (deprecated v0.11.0) ([#5747])
+ - JSON-RPC: `close` `destination` no longer allows p2pkh or p2sh addresses. (deprecated v0.11.0) ([#5747])
+ - JSON-RPC: `fundpsbt`/`utxopsbt` `reserve` must be a number, not bool. (deprecated v0.11.0) ([#5747])
+ - JSON-RPC: `invoice` `expiry` no longer allowed to be a string with suffix, use an integer number of seconds. (deprecated v0.11.0) ([#5747])
+ - JSON-RPC: `pay` for a bolt11 which uses a `description_hash`, without setting `description`. (deprecated v0.11.0) ([#5747])
+
+
+### Fixed
+
+ - gossip: We removed a warning for old `node_announcement` that was causing LND peers to disconnect ([#5925])
+ - gossip: We removed a warning for malformed `channel_update` that was causing LND peers to disconnect  ([#5897])
+ - cli: accepts long paths as options ([#5883])
+ - JSON-RPC: `getinfo` `blockheight` no longer sits on 0 while we sync with bitcoind the first time. ([#5963])
+ - keysend: Keysend would strip even allowed extra TLV types before resolving, this is no longer the case. ([#6031])
+ - lightningd: we no longer stack multiple reconnection attempts if connections fail. ([#5946])
+ - Plugins: `pay` uses the correct local channel for payments when there are multiple available (not just always the first!) ([#5947])
+ - Pruned channels are more reliably restored. ([#5839])
+ - `delpay`: Actually delete the specified payment (mainly found by `autoclean`). ([#6043])
+ - pay: Don't assert() on malformed BOLT11 strings. ([#5891])
+ - gossmap: Fixed `FATAL SIGNAL 11` on gossmap node announcement parsing. ([#6005])
+ - channeld no longer retains dead HTLCs in memory. ([#5882])
+ - database: Correctly identity official release versions for database upgrade. ([#5880])
+ - Plugins: `commando` now responds to remote JSON calls with the correct JSON `id` field. ([#5866])
+ - JSON-RPC: `datastore` handles escapes in `string` parameter correctly. ([#5994])
+ - JSON-RPC: `sendpay` now can send to a short-channel-id alias for the first hop. ([#5846])
+ - topology: Fixed memleak in `listchannels` ([#5865])
+
+
+### EXPERIMENTAL
+
+ - Protocol: Peer Storage: Distribute your encrypted backup to your peers, which can be retrieved to recover funds upon complete dataloss. ([#5361])
+ - Protocol: `offers` breaking blinded payments change (total_amount_sat required, update_add_tlvs fix, Eclair compat.) ([#5892])
+ - Protocol: Dual-funding spec changed in incompatible ways, won't work with old versions (but maybe soon with Eclair!!) ([#5956])
+ - Experimental-Dual-Fund: Open failures don't disconnect, but instead fail the opening process. ([#5767])
+ - JSON-RPC: `listtransactions` `channel` and `type` field removed at top level. ([#5679])
+
+
+[#5825]: https://github.com/ElementsProject/lightning/pull/5825
+[#5882]: https://github.com/ElementsProject/lightning/pull/5882
+[#5839]: https://github.com/ElementsProject/lightning/pull/5839
+[#5892]: https://github.com/ElementsProject/lightning/pull/5892
+[#5751]: https://github.com/ElementsProject/lightning/pull/5751
+[#5963]: https://github.com/ElementsProject/lightning/pull/5963
+[#5891]: https://github.com/ElementsProject/lightning/pull/5891
+[#5747]: https://github.com/ElementsProject/lightning/pull/5747
+[#5670]: https://github.com/ElementsProject/lightning/pull/5670
+[#5846]: https://github.com/ElementsProject/lightning/pull/5846
+[#5880]: https://github.com/ElementsProject/lightning/pull/5880
+[#5866]: https://github.com/ElementsProject/lightning/pull/5866
+[#5697]: https://github.com/ElementsProject/lightning/pull/5697
+[#5867]: https://github.com/ElementsProject/lightning/pull/5867
+[#5883]: https://github.com/ElementsProject/lightning/pull/5883
+[#5960]: https://github.com/ElementsProject/lightning/pull/5960
+[#5679]: https://github.com/ElementsProject/lightning/pull/5679
+[#5821]: https://github.com/ElementsProject/lightning/pull/5821
+[#5946]: https://github.com/ElementsProject/lightning/pull/5946
+[#5968]: https://github.com/ElementsProject/lightning/pull/5968
+[#5947]: https://github.com/ElementsProject/lightning/pull/5947
+[#5863]: https://github.com/ElementsProject/lightning/pull/5863
+[#5925]: https://github.com/ElementsProject/lightning/pull/5925
+[#5361]: https://github.com/ElementsProject/lightning/pull/5361
+[#5767]: https://github.com/ElementsProject/lightning/pull/5767
+[#5841]: https://github.com/ElementsProject/lightning/pull/5841
+[#5865]: https://github.com/ElementsProject/lightning/pull/5865
+[#5842]: https://github.com/ElementsProject/lightning/pull/5842
+[#5956]: https://github.com/ElementsProject/lightning/pull/5956
+[#5897]: https://github.com/ElementsProject/lightning/pull/5897
+[#5904]: https://github.com/ElementsProject/lightning/pull/5904
+[#5994]: https://github.com/ElementsProject/lightning/pull/5994
+[#6005]: https://github.com/ElementsProject/lightning/pull/6005
+
+
+## [22.11.1] - 2022-12-09: "Alameda Yield Generator II"
+
+### Added
+
+ - JSON-RPC: reverts requirement for "jsonrpc" "2.0" inside requests (still deprecated though, just for a while longer!) ([#5783])
+
+### Changed
+
+ - config: `announce-addr-dns` needs to be set to *true* to put DNS names into node announcements, otherwise they are suppressed.
+
+### Deprecated
+
+Note: You should always set `allow-deprecated-apis=false` to test for changes.
+
+ - config: `announce-addr-dns` (currently defaults to `false`).  This will default to `true` once enough of the network has upgraded to understand DNS entries. ([#5796])
+
+### Fixed
+
+ - Build: arm32 compiler error in fetchinvoice, due to bad types on 32-bit platforms. ([#5785])
+ - JSON-RPC: `autoclean-once` response `uncleaned` count is now correct. ([#5775])
+ - Plugin: `autoclean` could misperform or get killed due to lightningd's invalid handling of JSON batching. ([#5775])
+ - reckless verbosity properly applied. ([#5781])
+ - wireaddr: #5657 allow '_' underscore in hostname part of DNS FQDN ([#5789])
+
+[#5781]: https://github.com/ElementsProject/lightning/pull/5781
+[#5783]: https://github.com/ElementsProject/lightning/pull/5783
+[#5775]: https://github.com/ElementsProject/lightning/pull/5775
+[#5789]: https://github.com/ElementsProject/lightning/pull/5789
+[#5796]: https://github.com/ElementsProject/lightning/pull/5796
+[#5785]: https://github.com/ElementsProject/lightning/pull/5785
+[#5775]: https://github.com/ElementsProject/lightning/pull/5775
+[22.11.1]: https://github.com/ElementsProject/lightning/releases/tag/v22.11.1
+
+
+## [22.11] - 2022-11-30: "Alameda Yield Generator"
+
+
+This release named by @endothermicdev.
+### Added
+
+ - Reckless - a Core Lightning plugin manager ([#5647])
+ - Config: `--database-upgrade=true` required if a non-release version wants to (irrevocably!) upgrade the db. ([#5550])
+ - Documentation: `lightningd-rpc` manual page describes details of our JSON-RPC interface, including compatibility and filtering. ([#5681])
+ - JSON-RPC: `filter` object allows reduction of JSON response to (most) commands. ([#5681])
+ - cli: new `--filter` parameter to reduce JSON output. ([#5681])
+ - pyln: LightningRpc has new `reply_filter` context manager for reducing output of RPC commands. ([#5681])
+ - JSON-RPC: `listhtlcs` new command to list all known HTLCS. ([#5594])
+ - Plugins: `autoclean` can now delete old forwards, payments, and invoices automatically. ([#5594])
+ - Plugins: `autoclean-once` command for a single cleanup. ([#5594])
+ - Plugins: `autoclean-status` command to see what autoclean is doing. ([#5594])
+ - Config: `accept-htlc-tlv-types` lets us accept unknown even HTLC TLV fields we would normally reject on parsing (was EXPERIMENTAL-only `experimental-accept-extra-tlv-types`). ([#5619])
+ - JSON-RPC: The `extratlvs` argument for `keysend` now allows quoting the type numbers in string ([#5674])
+ - JSON-RPC: `batching` command to allow database transactions to cross multiple back-to-back JSON commands. ([#5594])
+ - JSON-RPC: `channel_opened` notification `channel_ready` flag. ([#5490])
+ - JSON-RPC: `delforward` command to delete listforwards entries. ([#5594])
+ - JSON-RPC: `delpay` takes optional `groupid` and `partid` parameters to specify exactly what payment to delete. ([#5594])
+ - JSON-RPC: `fundchannel`, `multifundchannel` and `fundchannel_start` now accept a `reserve` parameter to indicate the absolute reserve to impose on the peer. ([#5315])
+ - Plugins: `keysend` will now attach the longest valid text field in the onion to the invoice (so you can have Sphinx.chat users spam you!) ([#5619])
+ - JSON-RPC: `keysend` now has `extratlvs` option in non-EXPERIMENTAL builds. ([#5619])
+ - JSON-RPC: `listforwards` now shows `in_htlc_id` and `out_htlc_id` ([#5594])
+ - JSON-RPC: `makesecret` can take a string argument instead of hex. ([#5633])
+ - JSON-RPC: `pay` and `listpays` now lists the completion time. ([#5398])
+ - Plugins: Added notification topic "block_processed". ([#5581])
+ - Plugins: `keysend` now exposes the `extratlvs` field ([#5674])
+ - Plugins: The `openchannel` hook may return a custom absolute `reserve` value that the peer must not dip below. ([#5315])
+ - Plugins: `getmanfest` response can contain `nonnumericids` to indicate support for modern string-based JSON request ids. ([#5727])
+ - Protocol: We now delay forgetting funding-spent channels for 12 blocks (as per latest BOLTs, to support splicing in future). ([#5592])
+ - Protocol: We now set the `dont_forward` bit on private channel_update's message_flags (as per latest BOLTs). ([#5592])
+ - cln-plugin: Options are no longer required to have a default value ([#5369])
+
+
+### Changed
+
+ - Protocol: We now require all channel_update messages include htlc_maximum_msat (as per latest BOLTs) ([#5592])
+ - Protocol: Bolt7 #911 DNS annoucenent support is no longer EXPERIMENTAL ([#5487])
  - JSON-RPC: `listfunds` now lists coinbase outputs as 'immature' until they're spendable ([#5664])
  - JSON-RPC: UTXOs aren't spendable while immature ([#5664])
  - Plugins: `openchannel2` now always includes the `channel_max_msat` ([#5650])
  - JSON-RPC: `createonion` no longer allows non-TLV-style payloads. ([#5639])
  - cln-plugin: Moved the state binding to the plugin until after the configuration step ([#5493])
- - Protocol: We now require all channel_update messages include htlc_maximum_msat (as per latest BOLTs) ([#5592])
  - pyln-spec: package updated to latest spec version. ([#5621])
  - JSON-RPC: `listforwards` now never shows `payment_hash`; use `listhtlcs`. ([#5594])
  - cln-rpc: The `wrong_funding` argument for `close` was changed from `bytes` to `outpoint` ([#5444])
  - JSON-RPC: Error code from bcli plugin changed from 400 to 500. ([#5596])
  - Plugins: `balance_snapshot` notification does not send balances for channels that aren't locked-in/opened yet ([#5587])
- - Bolt7 #911 DNS annoucenent support is no longer EXPERIMENTAL ([#5487])
  - Plugins: RPC operations are now still available during shutdown. ([#5577])
  - JSON-RPC: `listpeers` `status` now refers to "channel ready" rather than "funding locked" (BOLT language change for zeroconf channels) ([#5490])
  - Protocol: `funding_locked` is now called `channel_ready` as per latest BOLTs. ([#5490])
@@ -70,6 +225,7 @@ Note: You should always set `allow-deprecated-apis=false` to test for changes.
  - JSON-RPC: `delexpiredinvoice`: use `autoclean-once`. ([#5594])
  - JSON-RPC: `commando-rune` restrictions is always an array, each element an array of alternatives.  Replaces a string with `|`-separators, so no escaping necessary except for `\\`. ([#5539])
  - JSON-RPC: `channel_opened` notification `funding_locked` flag (use `channel_ready`: BOLTs namechange). ([#5490])
+ - Plugins: numeric JSON request ids: modern ones will be strings (see doc/lightningd-rpc.7.md!) ([#5727])
 
 
 ### Removed
@@ -84,21 +240,26 @@ Note: You should always set `allow-deprecated-apis=false` to test for changes.
 
 
 ### Fixed
+
+ - plugins: `pay` now knows it can use locally-connected wumbo channels for large payments. ([#5746])
+ - lightningd: do not abort while parsing hsm pwd ([#5725])
+ - plugins: on large/slow nodes we could blame plugins for failing to answer init in time, when we were just slow. ([#5741])
  - ld: Reduce identification of own transactions to not slow down over time, reducing block processing time ([#5715])
+ - Fixed gossip_store corruption from duplicate private channel updates ([#5661])
+ - Fixed a condition for newly created channels that could trigger a need for reconnect. ([#5601])
+ - proper gossip_store operation may resolve some previous gossip propagation issues ([#5591])
  - onchaind: Witness weight estimations could be slightly lower than the VLS signer ([#5669])
  - Protocol: we now correctly decrypt non-256-length onion errors (we always forwarded them fine, now we actually can parse them). ([#5698])
- - Fixed gossip_store corruption from duplicate private channel updates ([#5661])
  - devtools: `mkfunding` command no longer crashes (abort) ([#5677])
+ - plugins: on large/slow nodes we could blame plugins for failing to answer init in time, when we were just slow. ([#5741])
  - Plugins: `funder` now honors lease requests across RBFs ([#5650])
  - Plugins: `keysend` now removes unknown even (technically illegal!) fields, to try to accept more payments. ([#5645])
  - channeld: Channel reinitialization no longer fails when the number of outstanding outgoing HTLCs exceeds `max_accepted_htlcs`. ([#5640])
  - pay: Squeezed out the last `msat` from our local view of the network ([#5315])
- - Fixed a condition for newly created channels that could trigger a need for reconnect. ([#5601])
  - peer_control: getinfo shows the correct port on discovered IPs ([#5585])
  - bcli: don't expose bitcoin RPC password on commandline ([#5509])
  - Plugins: topology plugin could crash when it sees duplicate private channel announcements. ([#5593])
  - JSON-RPC: `commando-rune` now handles \\ escapes properly. ([#5539])
- - proper gossip_store operation may resolve some previous gossip propagation issues ([#5591])
  - peer_control: getinfo showing unannounced addresses. ([#5584])
 
 
@@ -108,87 +269,116 @@ Note: You should always set `allow-deprecated-apis=false` to test for changes.
  - Protocol: Support for forwarding blinded payments (as per latest draft) ([#5646])
  - offers: complete rework of spec from other teams (yay!) breaks previous compatibility (boo!) ([#5646])
  - offers: old `payer_key` proofs won't work. ([#5646])
- - remove "vendor" (use "issuer") and "timestamp" (use "created_at") fields (deprecated v0.10.2). ([#5490])
+ - bolt12: remove "vendor" (use "issuer") and "timestamp" (use "created_at") fields (deprecated v0.10.2). ([#5490])
 
 
 
-[#5674]: https://github.com/ElementsProject/lightning/pull/5674
-[#5594]: https://github.com/ElementsProject/lightning/pull/5594
-[#5490]: https://github.com/ElementsProject/lightning/pull/5490
-[#5592]: https://github.com/ElementsProject/lightning/pull/5592
-[#5681]: https://github.com/ElementsProject/lightning/pull/5681
-[#5539]: https://github.com/ElementsProject/lightning/pull/5539
-[#5646]: https://github.com/ElementsProject/lightning/pull/5646
 [#5315]: https://github.com/ElementsProject/lightning/pull/5315
+[#5664]: https://github.com/ElementsProject/lightning/pull/5664
 [#5594]: https://github.com/ElementsProject/lightning/pull/5594
-[#5646]: https://github.com/ElementsProject/lightning/pull/5646
-[#5594]: https://github.com/ElementsProject/lightning/pull/5594
-[#5550]: https://github.com/ElementsProject/lightning/pull/5550
-[#5490]: https://github.com/ElementsProject/lightning/pull/5490
-[#5539]: https://github.com/ElementsProject/lightning/pull/5539
-[#5593]: https://github.com/ElementsProject/lightning/pull/5593
-[#5594]: https://github.com/ElementsProject/lightning/pull/5594
-[#5490]: https://github.com/ElementsProject/lightning/pull/5490
-[#5490]: https://github.com/ElementsProject/lightning/pull/5490
-[#5315]: https://github.com/ElementsProject/lightning/pull/5315
 [#5640]: https://github.com/ElementsProject/lightning/pull/5640
-[#5581]: https://github.com/ElementsProject/lightning/pull/5581
-[#5490]: https://github.com/ElementsProject/lightning/pull/5490
-[#5681]: https://github.com/ElementsProject/lightning/pull/5681
-[#5584]: https://github.com/ElementsProject/lightning/pull/5584
-[#5493]: https://github.com/ElementsProject/lightning/pull/5493
-[#5601]: https://github.com/ElementsProject/lightning/pull/5601
-[#5490]: https://github.com/ElementsProject/lightning/pull/5490
-[#5647]: https://github.com/ElementsProject/lightning/pull/5647
-[#5490]: https://github.com/ElementsProject/lightning/pull/5490
-[#5676]: https://github.com/ElementsProject/lightning/pull/5676
-[#5639]: https://github.com/ElementsProject/lightning/pull/5639
-[#5577]: https://github.com/ElementsProject/lightning/pull/5577
-[#5664]: https://github.com/ElementsProject/lightning/pull/5664
-[#5594]: https://github.com/ElementsProject/lightning/pull/5594
-[#5594]: https://github.com/ElementsProject/lightning/pull/5594
-[#5592]: https://github.com/ElementsProject/lightning/pull/5592
-[#5369]: https://github.com/ElementsProject/lightning/pull/5369
-[#5594]: https://github.com/ElementsProject/lightning/pull/5594
-[#5594]: https://github.com/ElementsProject/lightning/pull/5594
-[#5669]: https://github.com/ElementsProject/lightning/pull/5669
-[#5594]: https://github.com/ElementsProject/lightning/pull/5594
-[#5315]: https://github.com/ElementsProject/lightning/pull/5315
-[#5661]: https://github.com/ElementsProject/lightning/pull/5661
-[#5596]: https://github.com/ElementsProject/lightning/pull/5596
-[#5490]: https://github.com/ElementsProject/lightning/pull/5490
-[#5591]: https://github.com/ElementsProject/lightning/pull/5591
-[#5677]: https://github.com/ElementsProject/lightning/pull/5677
-[#5619]: https://github.com/ElementsProject/lightning/pull/5619
-[#5674]: https://github.com/ElementsProject/lightning/pull/5674
-[#5664]: https://github.com/ElementsProject/lightning/pull/5664
-[#5490]: https://github.com/ElementsProject/lightning/pull/5490
-[#5619]: https://github.com/ElementsProject/lightning/pull/5619
-[#5698]: https://github.com/ElementsProject/lightning/pull/5698
+[#5398]: https://github.com/ElementsProject/lightning/pull/5398
+[#5585]: https://github.com/ElementsProject/lightning/pull/5585
 [#5594]: https://github.com/ElementsProject/lightning/pull/5594
 [#5587]: https://github.com/ElementsProject/lightning/pull/5587
-[#5444]: https://github.com/ElementsProject/lightning/pull/5444
-[#5509]: https://github.com/ElementsProject/lightning/pull/5509
-[#5592]: https://github.com/ElementsProject/lightning/pull/5592
-[#5650]: https://github.com/ElementsProject/lightning/pull/5650
-[#5681]: https://github.com/ElementsProject/lightning/pull/5681
-[#5487]: https://github.com/ElementsProject/lightning/pull/5487
-[#5398]: https://github.com/ElementsProject/lightning/pull/5398
-[#5639]: https://github.com/ElementsProject/lightning/pull/5639
-[#5619]: https://github.com/ElementsProject/lightning/pull/5619
+[#5584]: https://github.com/ElementsProject/lightning/pull/5584
+[#5674]: https://github.com/ElementsProject/lightning/pull/5674
+[#5490]: https://github.com/ElementsProject/lightning/pull/5490
+[#5601]: https://github.com/ElementsProject/lightning/pull/5601
+[#5315]: https://github.com/ElementsProject/lightning/pull/5315
+[#5669]: https://github.com/ElementsProject/lightning/pull/5669
 [#5681]: https://github.com/ElementsProject/lightning/pull/5681
 [#5594]: https://github.com/ElementsProject/lightning/pull/5594
+[#5490]: https://github.com/ElementsProject/lightning/pull/5490
+[#5619]: https://github.com/ElementsProject/lightning/pull/5619
+[#5594]: https://github.com/ElementsProject/lightning/pull/5594
+[#5645]: https://github.com/ElementsProject/lightning/pull/5645
+[#5619]: https://github.com/ElementsProject/lightning/pull/5619
+[#5490]: https://github.com/ElementsProject/lightning/pull/5490
+[#5539]: https://github.com/ElementsProject/lightning/pull/5539
+[#5490]: https://github.com/ElementsProject/lightning/pull/5490
+[#5646]: https://github.com/ElementsProject/lightning/pull/5646
+[#5596]: https://github.com/ElementsProject/lightning/pull/5596
+[#5490]: https://github.com/ElementsProject/lightning/pull/5490
+[#5594]: https://github.com/ElementsProject/lightning/pull/5594
+[#5677]: https://github.com/ElementsProject/lightning/pull/5677
 [#5287]: https://github.com/ElementsProject/lightning/pull/5287
+[#5490]: https://github.com/ElementsProject/lightning/pull/5490
+[#5490]: https://github.com/ElementsProject/lightning/pull/5490
+[#5315]: https://github.com/ElementsProject/lightning/pull/5315
+[#5539]: https://github.com/ElementsProject/lightning/pull/5539
+[#5592]: https://github.com/ElementsProject/lightning/pull/5592
+[#5741]: https://github.com/ElementsProject/lightning/pull/5741
+[#5746]: https://github.com/ElementsProject/lightning/pull/5746
+[#5647]: https://github.com/ElementsProject/lightning/pull/5647
+[#5577]: https://github.com/ElementsProject/lightning/pull/5577
+[#5639]: https://github.com/ElementsProject/lightning/pull/5639
+[#5621]: https://github.com/ElementsProject/lightning/pull/5621
+[#5581]: https://github.com/ElementsProject/lightning/pull/5581
+[#5369]: https://github.com/ElementsProject/lightning/pull/5369
+[#5727]: https://github.com/ElementsProject/lightning/pull/5727
+[#5592]: https://github.com/ElementsProject/lightning/pull/5592
+[#5487]: https://github.com/ElementsProject/lightning/pull/5487
+[#5509]: https://github.com/ElementsProject/lightning/pull/5509
+[#5676]: https://github.com/ElementsProject/lightning/pull/5676
+[#5664]: https://github.com/ElementsProject/lightning/pull/5664
+[#5715]: https://github.com/ElementsProject/lightning/pull/5715
+[#5681]: https://github.com/ElementsProject/lightning/pull/5681
+[#5727]: https://github.com/ElementsProject/lightning/pull/5727
+[#5594]: https://github.com/ElementsProject/lightning/pull/5594
+[#5681]: https://github.com/ElementsProject/lightning/pull/5681
+[#5698]: https://github.com/ElementsProject/lightning/pull/5698
+[#5619]: https://github.com/ElementsProject/lightning/pull/5619
+[#5493]: https://github.com/ElementsProject/lightning/pull/5493
+[#5633]: https://github.com/ElementsProject/lightning/pull/5633
 [#5646]: https://github.com/ElementsProject/lightning/pull/5646
 [#5490]: https://github.com/ElementsProject/lightning/pull/5490
+[#5594]: https://github.com/ElementsProject/lightning/pull/5594
+[#5646]: https://github.com/ElementsProject/lightning/pull/5646
+[#5593]: https://github.com/ElementsProject/lightning/pull/5593
+[#5674]: https://github.com/ElementsProject/lightning/pull/5674
 [#5490]: https://github.com/ElementsProject/lightning/pull/5490
-[#5633]: https://github.com/ElementsProject/lightning/pull/5633
-[#5585]: https://github.com/ElementsProject/lightning/pull/5585
-[#5645]: https://github.com/ElementsProject/lightning/pull/5645
 [#5650]: https://github.com/ElementsProject/lightning/pull/5650
-[#5621]: https://github.com/ElementsProject/lightning/pull/5621
-[#5715]: https://github.com/ElementsProject/lightning/pull/5715
-[22.11rc2]: https://github.com/ElementsProject/lightning/releases/tag/v22.11rc2
+[#5594]: https://github.com/ElementsProject/lightning/pull/5594
+[#5594]: https://github.com/ElementsProject/lightning/pull/5594
+[#5592]: https://github.com/ElementsProject/lightning/pull/5592
+[#5639]: https://github.com/ElementsProject/lightning/pull/5639
+[#5490]: https://github.com/ElementsProject/lightning/pull/5490
+[#5550]: https://github.com/ElementsProject/lightning/pull/5550
+[#5490]: https://github.com/ElementsProject/lightning/pull/5490
+[#5725]: https://github.com/ElementsProject/lightning/pull/5725
+[#5594]: https://github.com/ElementsProject/lightning/pull/5594
+[#5444]: https://github.com/ElementsProject/lightning/pull/5444
+[#5650]: https://github.com/ElementsProject/lightning/pull/5650
+[#5594]: https://github.com/ElementsProject/lightning/pull/5594
+[#5661]: https://github.com/ElementsProject/lightning/pull/5661
+[#5681]: https://github.com/ElementsProject/lightning/pull/5681
+[#5591]: https://github.com/ElementsProject/lightning/pull/5591
+[22.11]: https://github.com/ElementsProject/lightning/releases/tag/v22.11
+
+
+## [0.12.1] - 2022-09-13: Web-8 init (dot one)
+
+Point release with some bugfixes and patches.
+
+### Removed
+
+- build: `mrkd` and `mistune` not required to build project
+
+### Fixed
+
+- lnprototest: builds for lnprototest tests now use 22.04 LTS, which fixes a problem with loading `mako`. ([#5583])
+- Plugins: topology plugin could crash when it sees duplicate private channel announcements ([#5593])
+- connectd: proper `gossip_store` operation may resolve some previous gossip propagation issues and connectd crashes ([#5591])
+- connectd: Fixed a condition for newly created channels that could trigger a need for reconnect. ([#5601])
+- `peer_control`: getinfo showing unannounced addresses. ([#5584])
+- `peer_control`: getinfo shows the correct port on discovered IPs ([#5585])
+
+
+[#5583]: https://github.com/ElementsProject/lightning/pull/5583
+[#5584]: https://github.com/ElementsProject/lightning/pull/5584
+[#5593]: https://github.com/ElementsProject/lightning/pull/5593
+[#5591]: https://github.com/ElementsProject/lightning/pull/5591
 
 
 ## [0.12.0] - 2022-08-23: Web-8 init
@@ -2046,6 +2236,7 @@ There predate the BOLT specifications, and are only of vague historic interest:
 6. [0.5.1] - 2016-10-21
 7. [0.5.2] - 2016-11-21: "Bitcoin Savings & Trust Daily Interest II"
 
+[23.02]: https://github.com/ElementsProject/lightning/releases/tag/v23.02
 [0.12.0]: https://github.com/ElementsProject/lightning/releases/tag/v0.12.0
 [0.11.2]: https://github.com/ElementsProject/lightning/releases/tag/v0.11.2
 [0.11.1]: https://github.com/ElementsProject/lightning/releases/tag/v0.11.1

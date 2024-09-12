@@ -3,6 +3,7 @@
 #include <bitcoin/script.h>
 #include <ccan/array_size/array_size.h>
 #include <ccan/tal/str/str.h>
+#include <common/gossip_store.h>
 #include <common/memleak.h>
 #include <common/pseudorand.h>
 #include <common/status.h>
@@ -127,51 +128,49 @@ static struct node_map *new_node_map(const tal_t *ctx)
 {
 	struct node_map *map = tal(ctx, struct node_map);
 	node_map_init(map);
-	tal_add_destructor(map, node_map_clear);
 	return map;
 }
 
 /* We use a simple array (with NULL entries) until we have too many. */
 static bool node_uses_chan_map(const struct node *node)
 {
-	/* This is a layering violation: last entry in htable is the table ptr,
-	 * which is never NULL */
-	return node->chans.arr[NUM_IMMEDIATE_CHANS] != NULL;
+	return node->chan_map;
 }
 
 /* When simple array fills, use a htable. */
 static void convert_node_to_chan_map(struct node *node)
 {
-	struct chan *chans[NUM_IMMEDIATE_CHANS];
-
-	memcpy(chans, node->chans.arr, sizeof(chans));
-	chan_map_init_sized(&node->chans.map, NUM_IMMEDIATE_CHANS + 1);
+	assert(!node_uses_chan_map(node));
+	node->chan_map = tal(node, struct chan_map);
+	chan_map_init_sized(node->chan_map, ARRAY_SIZE(node->chan_arr) + 1);
 	assert(node_uses_chan_map(node));
-	for (size_t i = 0; i < ARRAY_SIZE(chans); i++)
-		chan_map_add(&node->chans.map, chans[i]);
+	for (size_t i = 0; i < ARRAY_SIZE(node->chan_arr); i++) {
+		chan_map_add(node->chan_map, node->chan_arr[i]);
+		node->chan_arr[i] = NULL;
+	}
 }
 
 static void add_chan(struct node *node, struct chan *chan)
 {
 	if (!node_uses_chan_map(node)) {
-		for (size_t i = 0; i < NUM_IMMEDIATE_CHANS; i++) {
-			if (node->chans.arr[i] == NULL) {
-				node->chans.arr[i] = chan;
+		for (size_t i = 0; i < ARRAY_SIZE(node->chan_arr); i++) {
+			if (node->chan_arr[i] == NULL) {
+				node->chan_arr[i] = chan;
 				return;
 			}
 		}
 		convert_node_to_chan_map(node);
 	}
 
-	chan_map_add(&node->chans.map, chan);
+	chan_map_add(node->chan_map, chan);
 }
 
 static struct chan *next_chan_arr(const struct node *node,
 				  struct chan_map_iter *i)
 {
-	while (i->i.off < NUM_IMMEDIATE_CHANS) {
-		if (node->chans.arr[i->i.off])
-			return node->chans.arr[i->i.off];
+	while (i->i.off < ARRAY_SIZE(node->chan_arr)) {
+		if (node->chan_arr[i->i.off])
+			return node->chan_arr[i->i.off];
 		i->i.off++;
 	}
 	return NULL;
@@ -184,7 +183,7 @@ struct chan *first_chan(const struct node *node, struct chan_map_iter *i)
 		return next_chan_arr(node, i);
 	}
 
-	return chan_map_first(&node->chans.map, i);
+	return chan_map_first(node->chan_map, i);
 }
 
 struct chan *next_chan(const struct node *node, struct chan_map_iter *i)
@@ -194,7 +193,7 @@ struct chan *next_chan(const struct node *node, struct chan_map_iter *i)
 		return next_chan_arr(node, i);
 	}
 
-	return chan_map_next(&node->chans.map, i);
+	return chan_map_next(node->chan_map, i);
 }
 
 static void destroy_routing_state(struct routing_state *rstate)
@@ -205,9 +204,6 @@ static void destroy_routing_state(struct routing_state *rstate)
 	     chan;
 	     chan = uintmap_after(&rstate->chanmap, &idx))
 		free_chan(rstate, chan);
-
-	/* Free up our htables */
-	pending_cannouncement_map_clear(&rstate->pending_cannouncements);
 }
 
 /* We don't check this when loading from the gossip_store: that would break
@@ -234,14 +230,14 @@ static void memleak_help_routing_tables(struct htable *memtable,
 
 	memleak_scan_htable(memtable, &rstate->nodes->raw);
 	memleak_scan_htable(memtable, &rstate->pending_node_map->raw);
-	memleak_scan_htable(memtable, &rstate->pending_cannouncements.raw);
+	memleak_scan_htable(memtable, &rstate->pending_cannouncements->raw);
 	memleak_scan_uintmap(memtable, &rstate->unupdated_chanmap);
 
 	for (n = node_map_first(rstate->nodes, &nit);
 	     n;
 	     n = node_map_next(rstate->nodes, &nit)) {
 		if (node_uses_chan_map(n))
-			memleak_scan_htable(memtable, &n->chans.map.raw);
+			memleak_scan_htable(memtable, &n->chan_map->raw);
 	}
 }
 #endif /* DEVELOPER */
@@ -300,7 +296,8 @@ struct routing_state *new_routing_state(const tal_t *ctx,
 	rstate->last_timestamp = 0;
 	rstate->dying_channels = tal_arr(rstate, struct dying_channel, 0);
 
-	pending_cannouncement_map_init(&rstate->pending_cannouncements);
+	rstate->pending_cannouncements = tal(rstate, struct pending_cannouncement_map);
+	pending_cannouncement_map_init(rstate->pending_cannouncements);
 
 	uintmap_init(&rstate->chanmap);
 	uintmap_init(&rstate->unupdated_chanmap);
@@ -356,10 +353,6 @@ static void destroy_node(struct node *node, struct routing_state *rstate)
 	/* These remove themselves from chans[]. */
 	while ((c = first_chan(node, &i)) != NULL)
 		free_chan(rstate, c);
-
-	/* Free htable if we need. */
-	if (node_uses_chan_map(node))
-		chan_map_clear(&node->chans.map);
 }
 
 struct node *get_node(struct routing_state *rstate,
@@ -377,7 +370,8 @@ static struct node *new_node(struct routing_state *rstate,
 
 	n = tal(rstate, struct node);
 	n->id = *id;
-	memset(n->chans.arr, 0, sizeof(n->chans.arr));
+	memset(n->chan_arr, 0, sizeof(n->chan_arr));
+	n->chan_map = NULL;
 	broadcastable_init(&n->bcast);
 	broadcastable_init(&n->rgraph);
 	n->tokens = TOKEN_MAX;
@@ -385,6 +379,13 @@ static struct node *new_node(struct routing_state *rstate,
 	tal_add_destructor2(n, destroy_node, rstate);
 
 	return n;
+}
+
+static bool is_chan_zombie(struct chan *chan)
+{
+	if (chan->half[0].zombie || chan->half[1].zombie)
+		return true;
+	return false;
 }
 
 /* We've received a channel_announce for a channel attached to this node:
@@ -395,21 +396,35 @@ static bool node_has_public_channels(struct node *node)
 	struct chan *c;
 
 	for (c = first_chan(node, &i); c; c = next_chan(node, &i)) {
-		if (is_chan_public(c))
+		if (is_chan_public(c) && !is_chan_zombie(c))
 			return true;
 	}
 	return false;
 }
 
+static bool is_node_zombie(struct node* node)
+{
+	struct chan_map_iter i;
+	struct chan *c;
+
+	for (c = first_chan(node, &i); c; c = next_chan(node, &i)) {
+		if (!is_chan_zombie(c))
+			return false;
+	}
+	return true;
+}
+
 /* We can *send* a channel_announce for a channel attached to this node:
  * we only send once we have a channel_update. */
-static bool node_has_broadcastable_channels(struct node *node)
+bool node_has_broadcastable_channels(const struct node *node)
 {
 	struct chan_map_iter i;
 	struct chan *c;
 
 	for (c = first_chan(node, &i); c; c = next_chan(node, &i)) {
 		if (!is_chan_public(c))
+			continue;
+		if (is_chan_zombie(c))
 			continue;
 		if (is_halfchan_defined(&c->half[0])
 		    || is_halfchan_defined(&c->half[1]))
@@ -425,6 +440,10 @@ static bool node_announce_predates_channels(const struct node *node)
 
 	for (c = first_chan(node, &i); c; c = next_chan(node, &i)) {
 		if (!is_chan_public(c))
+			continue;
+
+		/* Zombies don't count! */
+		if (is_chan_zombie(c))
 			continue;
 
 		if (c->bcast.index < node->bcast.index)
@@ -451,6 +470,7 @@ static void force_node_announce_rexmit(struct routing_state *rstate,
 					     node->bcast.timestamp,
 					     is_local,
 					     false,
+					     false,
 					     NULL);
 	if (node->rgraph.index == initial_bcast_index){
 		node->rgraph.index = node->bcast.index;
@@ -464,6 +484,7 @@ static void force_node_announce_rexmit(struct routing_state *rstate,
 						      node->rgraph.timestamp,
 						      is_local,
 						      false,
+						      true,
 						      NULL);
 	}
 }
@@ -475,16 +496,16 @@ static void remove_chan_from_node(struct routing_state *rstate,
 
 	if (!node_uses_chan_map(node)) {
 		num_chans = 0;
-		for (size_t i = 0; i < NUM_IMMEDIATE_CHANS; i++) {
-			if (node->chans.arr[i] == chan)
-				node->chans.arr[i] = NULL;
-			else if (node->chans.arr[i] != NULL)
+		for (size_t i = 0; i < ARRAY_SIZE(node->chan_arr); i++) {
+			if (node->chan_arr[i] == chan)
+				node->chan_arr[i] = NULL;
+			else if (node->chan_arr[i] != NULL)
 				num_chans++;
 		}
 	} else {
-		if (!chan_map_del(&node->chans.map, chan))
+		if (!chan_map_del(node->chan_map, chan))
 			abort();
-		num_chans = chan_map_count(&node->chans.map);
+		num_chans = chan_map_count(node->chan_map);
 	}
 
 	/* Last channel?  Simply delete node (and associated announce) */
@@ -500,6 +521,7 @@ static void remove_chan_from_node(struct routing_state *rstate,
 		return;
 	}
 
+	/* Don't bother if there's no node_announcement */
 	if (!node->bcast.index)
 		return;
 
@@ -560,6 +582,7 @@ static void init_half_chan(struct routing_state *rstate,
 	broadcastable_init(&c->bcast);
 	broadcastable_init(&c->rgraph);
 	c->tokens = TOKEN_MAX;
+	c->zombie = false;
 }
 
 static void bad_gossip_order(const u8 *msg,
@@ -801,7 +824,7 @@ find_pending_cannouncement(struct routing_state *rstate,
 {
 	struct pending_cannouncement *pann;
 
-	pann = pending_cannouncement_map_get(&rstate->pending_cannouncements, scid);
+	pann = pending_cannouncement_map_get(rstate->pending_cannouncements, scid);
 
 	return pann;
 }
@@ -809,7 +832,7 @@ find_pending_cannouncement(struct routing_state *rstate,
 static void destroy_pending_cannouncement(struct pending_cannouncement *pending,
 					  struct routing_state *rstate)
 {
-	pending_cannouncement_map_del(&rstate->pending_cannouncements, pending);
+	pending_cannouncement_map_del(rstate->pending_cannouncements, pending);
 }
 
 static void add_channel_announce_to_broadcast(struct routing_state *rstate,
@@ -830,6 +853,7 @@ static void add_channel_announce_to_broadcast(struct routing_state *rstate,
 						     channel_announce,
 						     chan->bcast.timestamp,
 						     is_local,
+						     false,
 						     false,
 						     addendum);
 	rstate->local_channel_announced |= is_local;
@@ -866,8 +890,9 @@ static void delete_chan_messages_from_store(struct routing_state *rstate,
 static void remove_channel_from_store(struct routing_state *rstate,
 				      struct chan *chan)
 {
-	/* Put in tombstone marker */
-	gossip_store_mark_channel_deleted(rstate->gs, &chan->scid);
+	/* Put in tombstone marker. Zombie channels will have one already. */
+	if (!is_chan_zombie(chan))
+		gossip_store_mark_channel_deleted(rstate->gs, &chan->scid);
 
 	/* Now delete old entries. */
 	delete_chan_messages_from_store(rstate, chan);
@@ -955,10 +980,10 @@ bool routing_add_channel_announcement(struct routing_state *rstate,
 	/* If we had private updates, they'll immediately create the channel. */
 	if (private_updates[0])
 		routing_add_channel_update(rstate, take(private_updates[0]), 0,
-					   peer, false, false);
+					   peer, false, false, false);
 	if (private_updates[1])
 		routing_add_channel_update(rstate, take(private_updates[1]), 0,
-					   peer, false, false);
+					   peer, false, false, false);
 
 	/* Now we can finish cleanup of gossip store, so there's no window where
 	 * channel (or nodes) vanish. */
@@ -1111,7 +1136,7 @@ u8 *handle_channel_announcement(struct routing_state *rstate,
 	/* Don't add an infinite number of pending announcements.  If we're
 	 * catching up with the bitcoin chain, though, they can definitely
 	 * pile up. */
-	if (pending_cannouncement_map_count(&rstate->pending_cannouncements)
+	if (pending_cannouncement_map_count(rstate->pending_cannouncements)
 	    > 100000) {
 		static bool warned = false;
 		if (!warned) {
@@ -1133,7 +1158,7 @@ u8 *handle_channel_announcement(struct routing_state *rstate,
 	catch_node_announcement(pending, rstate, &pending->node_id_1);
 	catch_node_announcement(pending, rstate, &pending->node_id_2);
 
-	pending_cannouncement_map_add(&rstate->pending_cannouncements, pending);
+	pending_cannouncement_map_add(rstate->pending_cannouncements, pending);
 	tal_add_destructor2(pending, destroy_pending_cannouncement, rstate);
 
 	/* Success */
@@ -1237,7 +1262,7 @@ bool handle_pending_cannouncement(struct daemon *daemon,
 	}
 
 	/* Remove pending now, so below functions don't see it. */
-	pending_cannouncement_map_del(&rstate->pending_cannouncements, pending);
+	pending_cannouncement_map_del(rstate->pending_cannouncements, pending);
 	tal_del_destructor2(pending, destroy_pending_cannouncement, rstate);
 
 	/* Can fail if channel_announcement too old */
@@ -1302,7 +1327,8 @@ bool routing_add_channel_update(struct routing_state *rstate,
 				u32 index,
 				struct peer *peer,
 				bool ignore_timestamp,
-				bool force_spam_flag)
+				bool force_spam_flag,
+				bool force_zombie_flag)
 {
 	secp256k1_ecdsa_signature signature;
 	struct short_channel_id short_channel_id;
@@ -1319,6 +1345,7 @@ bool routing_add_channel_update(struct routing_state *rstate,
 	u8 direction;
 	struct amount_sat sat;
 	bool spam;
+	bool zombie;
 
 	/* Make sure we own msg, even if we don't save it. */
 	if (taken(update))
@@ -1339,6 +1366,7 @@ bool routing_add_channel_update(struct routing_state *rstate,
 	if (chan) {
 		uc = NULL;
 		sat = chan->sat;
+		zombie = is_chan_zombie(chan);
 	} else {
 		/* Maybe announcement was waiting for this update? */
 		uc = get_unupdated_channel(rstate, &short_channel_id);
@@ -1346,6 +1374,8 @@ bool routing_add_channel_update(struct routing_state *rstate,
 			return false;
 		}
 		sat = uc->sat;
+		/* When loading zombies from the store. */
+		zombie = force_zombie_flag;
 	}
 
 	/* Reject update if the `htlc_maximum_msat` is greater
@@ -1368,6 +1398,9 @@ bool routing_add_channel_update(struct routing_state *rstate,
 		assert(!chan);
 		chan = new_chan(rstate, &short_channel_id,
 				&uc->id[0], &uc->id[1], sat);
+		/* Assign zombie flag if loading zombie from store */
+		if (force_zombie_flag)
+			chan->half[direction].zombie = true;
 	}
 
 	/* Discard older updates */
@@ -1475,6 +1508,77 @@ bool routing_add_channel_update(struct routing_state *rstate,
 		return true;
 	}
 
+	/* Handle resurrection of zombie channels if the other side of the
+	 * zombie channel has a recent timestamp. */
+	if (zombie && timestamp_reasonable(rstate,
+		chan->half[!direction].bcast.timestamp) &&
+		chan->half[!direction].bcast.index && !index) {
+		status_peer_debug(peer ? &peer->id : NULL,
+				  "Resurrecting zombie channel %s.",
+				  type_to_string(tmpctx,
+						 struct short_channel_id,
+						 &chan->scid));
+		const u8 *zombie_announcement = NULL;
+		const u8 *zombie_addendum = NULL;
+		const u8 *zombie_update[2] = {NULL, NULL};
+		/* Resurrection is a careful process. First delete the zombie-
+		 * flagged channel_announcement which has already been
+		 * tombstoned, and re-add to the store without zombie flag. */
+		zombie_announcement = gossip_store_get(tmpctx, rstate->gs,
+						       chan->bcast.index);
+		u32 offset = tal_count(zombie_announcement) +
+			sizeof(struct gossip_hdr);
+		/* The channel_announcement addendum reminds us of its size. */
+		zombie_addendum = gossip_store_get(tmpctx, rstate->gs,
+						   chan->bcast.index + offset);
+		gossip_store_delete(rstate->gs, &chan->bcast,
+				    is_chan_public(chan)
+				    ? WIRE_CHANNEL_ANNOUNCEMENT
+				    : WIRE_GOSSIP_STORE_PRIVATE_CHANNEL);
+		chan->bcast.index =
+			gossip_store_add(rstate->gs, zombie_announcement,
+					 chan->bcast.timestamp,
+					 local_direction(rstate, chan, NULL),
+					 false, false, zombie_addendum);
+		/* Deletion of the old addendum is optional. */
+		/* This opposing channel_update has been stashed away.  Now that
+		 * there are two valid updates, this one gets restored. */
+		/* FIXME: Handle spam case probably needs a helper f'n */
+		zombie_update[0] = gossip_store_get(tmpctx, rstate->gs,
+			chan->half[!direction].bcast.index);
+		if (chan->half[!direction].bcast.index != chan->half[!direction].rgraph.index) {
+			/* Don't forget the spam channel_update */
+			zombie_update[1] = gossip_store_get(tmpctx, rstate->gs,
+				chan->half[!direction].rgraph.index);
+			gossip_store_delete(rstate->gs, &chan->half[!direction].rgraph,
+					    is_chan_public(chan)
+					    ? WIRE_CHANNEL_UPDATE
+					    : WIRE_GOSSIP_STORE_PRIVATE_UPDATE);
+		}
+		gossip_store_delete(rstate->gs, &chan->half[!direction].bcast,
+				    is_chan_public(chan)
+				    ? WIRE_CHANNEL_UPDATE
+				    : WIRE_GOSSIP_STORE_PRIVATE_UPDATE);
+		chan->half[!direction].bcast.index =
+			gossip_store_add(rstate->gs, zombie_update[0],
+					 chan->half[!direction].bcast.timestamp,
+					 local_direction(rstate, chan, NULL),
+					 false, false, NULL);
+		if (zombie_update[1])
+			chan->half[!direction].rgraph.index =
+				gossip_store_add(rstate->gs, zombie_update[1],
+						 chan->half[!direction].rgraph.timestamp,
+						 local_direction(rstate, chan, NULL),
+						 false, true, NULL);
+		else
+			chan->half[!direction].rgraph.index = chan->half[!direction].bcast.index;
+
+		/* It's a miracle! */
+		chan->half[0].zombie = false;
+		chan->half[1].zombie = false;
+		zombie = false;
+	}
+
 	/* If we're loading from store, this means we don't re-add to store. */
 	if (index) {
 		if (!spam)
@@ -1484,7 +1588,7 @@ bool routing_add_channel_update(struct routing_state *rstate,
 		hc->rgraph.index
 			= gossip_store_add(rstate->gs, update, timestamp,
 					   local_direction(rstate, chan, NULL),
-					   spam, NULL);
+					   zombie, spam, NULL);
 		if (hc->bcast.timestamp > rstate->last_timestamp
 		    && hc->bcast.timestamp < time_now().ts.tv_sec)
 			rstate->last_timestamp = hc->bcast.timestamp;
@@ -1566,10 +1670,15 @@ u8 *handle_channel_update(struct routing_state *rstate, const u8 *update TAKES,
 				     &htlc_minimum, &fee_base_msat,
 				     &fee_proportional_millionths,
 				     &htlc_maximum)) {
-		warn = towire_warningfmt(rstate, NULL,
-					 "Malformed channel_update %s",
-					 tal_hex(tmpctx, serialized));
-		return warn;
+		/* FIXME: We removed a warning about the
+		 * channel_update being malformed since the warning
+		 * could cause lnd to disconnect (seems they treat
+		 * channel-unrelated warnings as fatal?). This was
+		 * caused by lnd not enforcing the `htlc_maximum`,
+		 * thus the parsing would fail. We can re-add the
+		 * warning once our assumption that `htlc_maximum`
+		 * being set is valid. */
+		return NULL;
 	}
 	direction = channel_flags & 0x1;
 
@@ -1636,7 +1745,8 @@ u8 *handle_channel_update(struct routing_state *rstate, const u8 *update TAKES,
 		return warn;
 	}
 
-	routing_add_channel_update(rstate, take(serialized), 0, peer, force, false);
+	routing_add_channel_update(rstate, take(serialized), 0, peer, force,
+				   false, false);
 	return NULL;
 }
 
@@ -1692,9 +1802,12 @@ bool routing_add_node_announcement(struct routing_state *rstate,
 		if (!pna) {
 			if (was_unknown)
 				*was_unknown = true;
-			bad_gossip_order(msg, peer,
-					 type_to_string(tmpctx, struct node_id,
-							&node_id));
+			/* Don't complain if it's a zombie node! */
+			if (!node || !is_node_zombie(node)) {
+				bad_gossip_order(msg, peer,
+						 type_to_string(tmpctx, struct node_id,
+								&node_id));
+			}
 			return false;
 		} else if (timestamp <= pna->timestamp)
 			/* Ignore old ones: they're OK (unless from store). */
@@ -1799,7 +1912,7 @@ bool routing_add_node_announcement(struct routing_state *rstate,
 			= gossip_store_add(rstate->gs, msg, timestamp,
 					   node_id_eq(&node_id,
 						      &rstate->local_id),
-					   spam, NULL);
+					   false, spam, NULL);
 		if (node->bcast.timestamp > rstate->last_timestamp
 		    && node->bcast.timestamp < time_now().ts.tv_sec)
 			rstate->last_timestamp = node->bcast.timestamp;
@@ -1850,10 +1963,12 @@ u8 *handle_node_announcement(struct routing_state *rstate, const u8 *node_ann,
 		 *    - MAY close the connection.
 		 *    - MUST NOT process the message further.
 		 */
-		u8 *warn = towire_warningfmt(rstate, NULL,
-					    "Malformed node_announcement %s",
-					    tal_hex(tmpctx, node_ann));
-		return warn;
+		/* FIXME: We removed a warning about the
+		 * node_announcement being malformed since the warning
+		 * could cause lnd to disconnect (seems they treat
+		 * channel-unrelated warnings as fatal?).
+		 */
+		return NULL;
 	}
 
 	sha256_double(&hash, serialized + 66, tal_count(serialized) - 66);
@@ -1903,6 +2018,52 @@ u8 *handle_node_announcement(struct routing_state *rstate, const u8 *node_ann,
 	return NULL;
 }
 
+/* Set zombie flags in gossip_store and tombstone the channel for any
+ * gossip_store consumers. Remove any orphaned node_announcements. */
+static void zombify_channel(struct routing_state *rstate, struct chan *channel)
+{
+	struct half_chan *half;
+	assert(!is_chan_zombie(channel));
+	gossip_store_mark_channel_zombie(rstate->gs, &channel->bcast);
+	gossip_store_mark_channel_deleted(rstate->gs, &channel->scid);
+	for (int i = 0; i < 2; i++) {
+		half = &channel->half[i];
+		half->zombie = true;
+		if (half->bcast.index) {
+			gossip_store_mark_cupdate_zombie(rstate->gs, &half->bcast);
+			/* Channel may also have a spam entry */
+			if (half->bcast.index != half->rgraph.index)
+				gossip_store_mark_cupdate_zombie(rstate->gs,
+								 &half->rgraph);
+		}
+	}
+	status_debug("Channel %s zombified",
+		     type_to_string(tmpctx, struct short_channel_id,
+				    &channel->scid));
+
+	/* If one of the nodes has no remaining active channels, forget
+	 * the node_announcement. Also recheck node_announcement order. */
+	for (int i = 0; i < 2; i++) {
+		struct node *node = channel->nodes[i];
+		if (node_has_broadcastable_channels(node)) {
+			if (!node->bcast.index)
+				continue;
+			if (node_announce_predates_channels(node)) {
+				/* Make sure the node announcement follows a channel
+				* announcement. */
+				force_node_announce_rexmit(rstate, node);
+			}
+			continue;
+		}
+		if (node->rgraph.index != node->bcast.index)
+			gossip_store_delete(rstate->gs, &node->rgraph,
+					    WIRE_NODE_ANNOUNCEMENT);
+		gossip_store_delete(rstate->gs, &node->bcast,
+				    WIRE_NODE_ANNOUNCEMENT);
+		node->rgraph.index = node->bcast.index = 0;
+	}
+}
+
 void route_prune(struct routing_state *rstate)
 {
 	u64 now = gossip_time_now(rstate).ts.tv_sec;
@@ -1917,6 +2078,9 @@ void route_prune(struct routing_state *rstate)
 	     chan = uintmap_after(&rstate->chanmap, &idx)) {
 		/* Local-only?  Don't prune. */
 		if (!is_chan_public(chan))
+			continue;
+		/* These have been pruned already */
+		if (is_chan_zombie(chan))
 			continue;
 
 		/* BOLT #7:
@@ -1953,10 +2117,12 @@ void route_prune(struct routing_state *rstate)
 		}
 	}
 
-	/* Now free all the chans and maybe even nodes. */
+	/* Any channels missing an update are now considered zombies. They may
+	 * come back later, in which case the channel_announcement needs to be
+	 * stashed away for later use. If all remaining channels for a node are
+	 * zombies, the node is zombified too. */
 	for (size_t i = 0; i < tal_count(pruned); i++) {
-		remove_channel_from_store(rstate, pruned[i]);
-		free_chan(rstate, pruned[i]);
+		zombify_channel(rstate, pruned[i]);
 	}
 }
 
@@ -2025,7 +2191,8 @@ bool routing_add_private_channel(struct routing_state *rstate,
 		u8 *msg = towire_gossip_store_private_channel(tmpctx,
 							      capacity,
 							      chan_ann);
-		index = gossip_store_add(rstate->gs, msg, 0, false, false, NULL);
+		index = gossip_store_add(rstate->gs, msg, 0, false, false,
+					 false, NULL);
 	}
 	chan->bcast.index = index;
 	return true;
@@ -2076,8 +2243,6 @@ void remove_all_gossip(struct routing_state *rstate)
 	 * manually. */
 	while ((n = node_map_first(rstate->nodes, &nit)) != NULL) {
 		tal_del_destructor2(n, destroy_node, rstate);
-		if (node_uses_chan_map(n))
-			chan_map_clear(&n->chans.map);
 		node_map_del(rstate->nodes, n);
 		tal_free(n);
 	}
@@ -2094,7 +2259,7 @@ void remove_all_gossip(struct routing_state *rstate)
 	while ((uc = uintmap_first(&rstate->unupdated_chanmap, &index)) != NULL)
 		tal_free(uc);
 
-	while ((pca = pending_cannouncement_map_first(&rstate->pending_cannouncements, &pit)) != NULL)
+	while ((pca = pending_cannouncement_map_first(rstate->pending_cannouncements, &pit)) != NULL)
 		tal_free(pca);
 
 	/* Freeing unupdated chanmaps should empty this */
@@ -2172,7 +2337,7 @@ void routing_channel_spent(struct routing_state *rstate,
 
 	/* Save to gossip_store in case we restart */
 	msg = towire_gossip_store_chan_dying(tmpctx, &chan->scid, deadline);
-	index = gossip_store_add(rstate->gs, msg, 0, false, false, NULL);
+	index = gossip_store_add(rstate->gs, msg, 0, false, false, false, NULL);
 
 	/* Remember locally so we can kill it in 12 blocks */
 	status_debug("channel %s closing soon due"

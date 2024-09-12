@@ -403,11 +403,15 @@ void json_add_u64(struct json_stream *result UNNEEDED, const char *fieldname UNN
 { fprintf(stderr, "json_add_u64 called!\n"); abort(); }
 /* Generated stub for json_add_uncommitted_channel */
 void json_add_uncommitted_channel(struct json_stream *response UNNEEDED,
-				  const struct uncommitted_channel *uc UNNEEDED)
+				  const struct uncommitted_channel *uc UNNEEDED,
+				  /* Only set for listpeerchannels */
+				  const struct peer *peer UNNEEDED)
 { fprintf(stderr, "json_add_uncommitted_channel called!\n"); abort(); }
 /* Generated stub for json_add_unsaved_channel */
 void json_add_unsaved_channel(struct json_stream *response UNNEEDED,
-			      const struct channel *channel UNNEEDED)
+			      const struct channel *channel UNNEEDED,
+			      /* Only set for listpeerchannels */
+			      const struct peer *peer UNNEEDED)
 { fprintf(stderr, "json_add_unsaved_channel called!\n"); abort(); }
 /* Generated stub for json_array_end */
 void json_array_end(struct json_stream *js UNNEEDED)
@@ -1046,13 +1050,14 @@ static bool test_wallet_outputs(struct lightningd *ld, const tal_t *ctx)
 	/* Arbitrarily set scriptpubkey len to 20 */
 	u.scriptPubkey = tal_arr(w, u8, 20);
 	memset(u.scriptPubkey, 1, 20);
-	CHECK_MSG(wallet_add_utxo(w, &u, p2sh_wpkh),
+	CHECK_MSG(wallet_add_utxo(w, &u, our_change),
 		  "wallet_add_utxo with close_info");
 
 	/* Now select them */
 	utxos = tal_arr(w, const struct utxo *, 0);
 	while ((one_utxo = wallet_find_utxo(w, w, 100, NULL, 253,
 					    0 /* no confirmations required */,
+					    false,
 					    utxos)) != NULL) {
 		tal_arr_expand(&utxos, one_utxo);
 	}
@@ -1141,6 +1146,7 @@ static bool test_wallet_outputs(struct lightningd *ld, const tal_t *ctx)
 	utxos = tal_arr(w, const struct utxo *, 0);
 	while ((one_utxo = wallet_find_utxo(w, w, 100, NULL, 253,
 					    0 /* no confirmations required */,
+					    false,
 					    utxos)) != NULL) {
 		tal_arr_expand(&utxos, one_utxo);
 	}
@@ -1162,6 +1168,7 @@ static bool test_wallet_outputs(struct lightningd *ld, const tal_t *ctx)
 	utxos = tal_arr(w, const struct utxo *, 0);
 	while ((one_utxo = wallet_find_utxo(w, w, 104, NULL, 253,
 					    0 /* no confirmations required */,
+					    false,
 					    utxos)) != NULL) {
 		tal_arr_expand(&utxos, one_utxo);
 	}
@@ -1178,6 +1185,35 @@ static bool test_wallet_outputs(struct lightningd *ld, const tal_t *ctx)
 	}
 	/* Now un-reserve them */
 	tal_free(utxos);
+
+	/* Check that nonwrapped flag works */
+	utxos = tal_arr(w, const struct utxo *, 0);
+	while ((one_utxo = wallet_find_utxo(w, w, 100, NULL, 253,
+					    0 /* no confirmations required */,
+					    true,
+					    utxos)) != NULL) {
+		tal_arr_expand(&utxos, one_utxo);
+	}
+	/* No nonwrapped outputs available */
+	CHECK(tal_count(utxos) == 0);
+	tal_free(utxos);
+
+	/* So we add one... */
+	memset(&u.outpoint, 4, sizeof(u.outpoint));
+	u.amount = AMOUNT_SAT(4);
+	u.close_info = tal_free(u.close_info);
+	CHECK_MSG(wallet_add_utxo(w, &u, p2wpkh),
+		  "wallet_add_utxo failed, p2wpkh");
+
+	utxos = tal_arr(w, const struct utxo *, 0);
+	while ((one_utxo = wallet_find_utxo(w, w, 100, NULL, 253,
+					    0 /* no confirmations required */,
+					    true,
+					    utxos)) != NULL) {
+		tal_arr_expand(&utxos, one_utxo);
+	}
+	/* And that's what comes back */
+	CHECK(tal_count(utxos) == 1);
 
 	db_commit_transaction(w->db);
 	return true;
@@ -1248,6 +1284,7 @@ static bool channel_inflightseq(struct channel_inflight *i1,
 		    &i2->last_sig, sizeof(i2->last_sig)));
 	CHECK(bitcoin_tx_eq(i1->last_tx, i2->last_tx));
 
+	CHECK(amount_sat_eq(i1->lease_amt, i2->lease_amt));
 	CHECK(!i1->lease_commit_sig == !i2->lease_commit_sig);
 	if (i1->lease_commit_sig)
 		CHECK(memeq(i1->lease_commit_sig, sizeof(*i1->lease_commit_sig),
@@ -1366,11 +1403,12 @@ static struct channel *wallet_channel_load(struct wallet *w, const u64 dbid)
 {
 	struct peer *peer;
 	struct channel *channel;
+	struct peer_node_id_map_iter it;
 
 	/* We expect only one peer, but reuse same code */
 	if (!wallet_init_channels(w))
 		return NULL;
-	peer = list_top(&w->ld->peers, struct peer, list);
+	peer = peer_node_id_map_first(w->ld->peers, &it);
 	CHECK(peer);
 
 	/* We load lots of identical dbid channels: use last one */
@@ -1617,7 +1655,7 @@ static bool test_channel_inflight_crud(struct lightningd *ld, const tal_t *ctx)
 			   NULL,
 			   DUALOPEND_AWAITING_LOCKIN,
 			   LOCAL, NULL, "billboard",
-			   8, &our_config,
+			   8, false, false, &our_config,
 			   101, 1, 1, 1,
 			   &outpoint,
 			   funding_sats, AMOUNT_MSAT(0),
@@ -1669,7 +1707,8 @@ static bool test_channel_inflight_crud(struct lightningd *ld, const tal_t *ctx)
 				last_tx,
 				sig,
 				1, lease_commit_sig, 2, 4, 22,
-				AMOUNT_MSAT(10));
+				AMOUNT_MSAT(10),
+				AMOUNT_SAT(1111));
 
 	/* do inflights get correctly added to the channel? */
 	wallet_inflight_add(w, inflight);
@@ -1692,7 +1731,8 @@ static bool test_channel_inflight_crud(struct lightningd *ld, const tal_t *ctx)
 				last_tx,
 				sig,
 				0, NULL, 0, 0, 0,
-				AMOUNT_MSAT(0));
+				AMOUNT_MSAT(0),
+				AMOUNT_SAT(0));
 	wallet_inflight_add(w, inflight);
 	CHECK_MSG(c2 = wallet_channel_load(w, chan->dbid),
 		  tal_fmt(w, "Load from DB"));
@@ -1850,8 +1890,6 @@ static bool test_htlc_crud(struct lightningd *ld, const tal_t *ctx)
 	 * twisted */
 	tal_free(hin);
 	tal_free(hout);
-	htlc_in_map_clear(htlcs_in);
-	htlc_out_map_clear(htlcs_out);
 
 	return true;
 }
@@ -1929,12 +1967,17 @@ int main(int argc, const char *argv[])
 	ld->config = test_config;
 
 	/* Only elements in ld we should access */
-	list_head_init(&ld->peers);
+	ld->peers = tal(ld, struct peer_node_id_map);
+	peer_node_id_map_init(ld->peers);
+	ld->peers_by_dbid = tal(ld, struct peer_dbid_map);
+	peer_dbid_map_init(ld->peers_by_dbid);
 	ld->rr_counter = 0;
 	node_id_from_hexstr("02a1633cafcc01ebfb6d78e39f687a1f0995c62fc95f51ead10a02ee0be551b5dc", 66, &ld->id);
 	/* Accessed in peer destructor sanity check */
-	htlc_in_map_init(&ld->htlcs_in);
-	htlc_out_map_init(&ld->htlcs_out);
+	ld->htlcs_in = tal(ld, struct htlc_in_map);
+	htlc_in_map_init(ld->htlcs_in);
+	ld->htlcs_out = tal(ld, struct htlc_out_map);
+	htlc_out_map_init(ld->htlcs_out);
 
 	/* We do a runtime test here, so we still check compile! */
 	if (HAVE_SQLITE3) {

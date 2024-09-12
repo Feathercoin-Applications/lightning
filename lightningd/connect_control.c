@@ -76,7 +76,8 @@ static void try_connect(const tal_t *ctx,
 			struct lightningd *ld,
 			const struct node_id *id,
 			u32 seconds_delay,
-			const struct wireaddr_internal *addrhint);
+			const struct wireaddr_internal *addrhint,
+			bool dns_fallback);
 
 struct id_and_addr {
 	struct node_id id;
@@ -226,7 +227,7 @@ static struct command_result *json_connect(struct command *cmd,
 					   &peer->addr);
 	}
 
- 	try_connect(cmd, cmd->ld, &id_addr.id, 0, addr);
+	try_connect(cmd, cmd->ld, &id_addr.id, 0, addr, true);
 
 	/* Leave this here for peer_connected, connect_failed or peer_disconnect_done. */
 	new_connect(cmd->ld, &id_addr.id, cmd);
@@ -248,7 +249,24 @@ struct delayed_reconnect {
 	struct lightningd *ld;
 	struct node_id id;
 	struct wireaddr_internal *addrhint;
+	bool dns_fallback;
 };
+
+static const struct node_id *delayed_reconnect_keyof(const struct delayed_reconnect *d)
+{
+	return &d->id;
+}
+
+static bool node_id_delayed_reconnect_eq(const struct delayed_reconnect *d,
+					 const struct node_id *node_id)
+{
+	return node_id_eq(node_id, &d->id);
+}
+
+HTABLE_DEFINE_TYPE(struct delayed_reconnect,
+		   delayed_reconnect_keyof,
+		   node_id_hash, node_id_delayed_reconnect_eq,
+		   delayed_reconnect_map);
 
 static void gossipd_got_addrs(struct subd *subd,
 			      const u8 *msg,
@@ -265,7 +283,8 @@ static void gossipd_got_addrs(struct subd *subd,
 	connectmsg = towire_connectd_connect_to_peer(NULL,
 						     &d->id,
 						     addrs,
-						     d->addrhint);
+						     d->addrhint,
+						     d->dns_fallback);
 	subd_send_msg(d->ld->connectd, take(connectmsg));
 	tal_free(d);
 }
@@ -278,19 +297,38 @@ static void do_connect(struct delayed_reconnect *d)
 	subd_req(d, d->ld->gossip, take(msg), -1, 0, gossipd_got_addrs, d);
 }
 
+static void destroy_delayed_reconnect(struct delayed_reconnect *d)
+{
+	delayed_reconnect_map_del(d->ld->delayed_reconnect_map, d);
+}
+
 static void try_connect(const tal_t *ctx,
 			struct lightningd *ld,
 			const struct node_id *id,
 			u32 seconds_delay,
-			const struct wireaddr_internal *addrhint)
+			const struct wireaddr_internal *addrhint,
+			bool dns_fallback)
 {
 	struct delayed_reconnect *d;
 	struct peer *peer;
+
+	/* Don't stack, unless this is an instant reconnect */
+	d = delayed_reconnect_map_get(ld->delayed_reconnect_map, id);
+	if (d) {
+		if (seconds_delay) {
+			log_peer_debug(ld->log, id, "Already reconnecting");
+			return;
+		}
+		tal_free(d);
+	}
 
 	d = tal(ctx, struct delayed_reconnect);
 	d->ld = ld;
 	d->id = *id;
 	d->addrhint = tal_dup_or_null(d, struct wireaddr_internal, addrhint);
+	d->dns_fallback = dns_fallback;
+	delayed_reconnect_map_add(ld->delayed_reconnect_map, d);
+	tal_add_destructor(d, destroy_delayed_reconnect);
 
 	if (!seconds_delay) {
 		do_connect(d);
@@ -347,11 +385,14 @@ void try_reconnect(const tal_t *ctx,
 	} else
 		peer->reconnect_delay = INITIAL_WAIT_SECONDS;
 
+	/* We only do DNS fallback lookups for manual connections, to
+	 * avoid stressing DNS servers for private nodes (sorry!) */
 	try_connect(ctx,
 		    peer->ld,
 		    &peer->id,
 		    peer->reconnect_delay,
-		    addrhint);
+		    addrhint,
+		    false);
 }
 
 /* We were trying to connect, but they disconnected. */
@@ -481,6 +522,32 @@ static void handle_custommsg_in(struct lightningd *ld, const u8 *msg)
 	plugin_hook_call_custommsg(ld, NULL, p);
 }
 
+static void connectd_start_shutdown_reply(struct subd *connectd,
+					  const u8 *reply,
+					  const int *fds UNUSED,
+					  void *unused UNUSED)
+{
+	if (!fromwire_connectd_start_shutdown_reply(reply))
+		fatal("Bad connectd_start_shutdown_reply: %s",
+		      tal_hex(reply, reply));
+
+	/* Break out of loop now, so we can continue shutdown. */
+	log_debug(connectd->ld->log, "io_break: %s", __func__);
+	io_break(connectd);
+}
+
+void connectd_start_shutdown(struct subd *connectd)
+{
+	const u8 *msg = towire_connectd_start_shutdown(NULL);
+
+	subd_req(connectd, connectd, take(msg), -1, 0,
+		 connectd_start_shutdown_reply, NULL);
+
+	/* Wait for shutdown_reply.  Note that since we're shutting down,
+	 * start_json_stream can io_break too! */
+	while (io_loop(NULL, NULL) != connectd);
+}
+
 static unsigned connectd_msg(struct subd *connectd, const u8 *msg, const int *fds)
 {
 	enum connectd_wire t = fromwire_peektype(msg);
@@ -498,11 +565,13 @@ static unsigned connectd_msg(struct subd *connectd, const u8 *msg, const int *fd
 	case WIRE_CONNECTD_PING:
 	case WIRE_CONNECTD_SEND_ONIONMSG:
 	case WIRE_CONNECTD_CUSTOMMSG_OUT:
+	case WIRE_CONNECTD_START_SHUTDOWN:
 	/* This is a reply, so never gets through to here. */
 	case WIRE_CONNECTD_INIT_REPLY:
 	case WIRE_CONNECTD_ACTIVATE_REPLY:
 	case WIRE_CONNECTD_DEV_MEMLEAK_REPLY:
 	case WIRE_CONNECTD_PING_REPLY:
+	case WIRE_CONNECTD_START_SHUTDOWN_REPLY:
 		break;
 
 	case WIRE_CONNECTD_PEER_CONNECTED:
@@ -568,6 +637,9 @@ int connectd_init(struct lightningd *ld)
 	enum addr_listen_announce *listen_announce = ld->proposed_listen_announce;
 	const char *websocket_helper_path;
 	void *ret;
+
+	ld->delayed_reconnect_map = tal(ld, struct delayed_reconnect_map);
+	delayed_reconnect_map_init(ld->delayed_reconnect_map);
 
 	websocket_helper_path = subdaemon_path(tmpctx, ld,
 					       "lightning_websocketd");
@@ -680,7 +752,9 @@ static struct command_result *json_sendcustommsg(struct command *cmd,
 		return command_param_failed();
 
 	type = fromwire_peektype(msg);
-	if (peer_wire_is_defined(type)) {
+
+	/* Allow peer_storage and your_peer_storage msgtypes */
+	if (peer_wire_is_internal(type)) {
 		return command_fail(
 		    cmd, JSONRPC2_INVALID_REQUEST,
 		    "Cannot send messages of type %d (%s). It is not possible "
@@ -707,11 +781,11 @@ static struct command_result *json_sendcustommsg(struct command *cmd,
 				    type_to_string(cmd, struct node_id, dest));
 	}
 
-	if (peer->connected != PEER_CONNECTED)
+	/* We allow messages from plugins responding to peer_connected hook,
+	 * so can be PEER_CONNECTING. */
+	if (peer->connected == PEER_DISCONNECTED)
 		return command_fail(cmd, JSONRPC2_INVALID_REQUEST,
-				    "Peer is %s",
-				    peer->connected == PEER_DISCONNECTED
-				    ? "not connected" : "still connecting");
+				    "Peer is not connected");
 
 	subd_send_msg(cmd->ld->connectd,
 		      take(towire_connectd_custommsg_out(cmd, dest, msg)));

@@ -54,6 +54,9 @@ struct channel_inflight {
 	/* We save this data so we can do nice accounting;
 	 * on the channel we slot it into the 'push' field */
 	struct amount_msat lease_fee;
+
+	/* Amount requested to lease for this open */
+	struct amount_sat lease_amt;
 };
 
 struct open_attempt {
@@ -116,6 +119,9 @@ struct channel {
 	/* Our channel config. */
 	struct channel_config our_config;
 
+	/* Require confirmed inputs for interactive tx */
+	bool req_confirmed_ins[NUM_SIDES];
+
 	/* Minimum funding depth (specified by us if they fund). */
 	u32 minimum_depth;
 
@@ -157,7 +163,6 @@ struct channel {
 
 	/* Last tx they gave us. */
 	struct bitcoin_tx *last_tx;
-	enum wallet_tx_type last_tx_type;
 	struct bitcoin_signature last_sig;
 	const struct bitcoin_signature *last_htlc_sigs;
 
@@ -281,6 +286,8 @@ struct channel *new_channel(struct peer *peer, u64 dbid,
 			    struct log *log STEALS,
 			    const char *transient_billboard TAKES,
 			    u8 channel_flags,
+			    bool req_confirmed_ins_local,
+			    bool req_confirmed_ins_remote,
 			    const struct channel_config *our_config,
 			    u32 minimum_depth,
 			    u64 next_index_local,
@@ -352,7 +359,8 @@ new_inflight(struct channel *channel,
 	     const u32 lease_chan_max_msat,
 	     const u16 lease_chan_max_ppt,
 	     const u32 lease_blockheight_start,
-	     const struct amount_msat lease_fee);
+	     const struct amount_msat lease_fee,
+	     const struct amount_sat lease_amt);
 
 /* Given a txid, find an inflight channel stub. Returns NULL if none found */
 struct channel_inflight *channel_inflight_find(struct channel *channel,
@@ -375,9 +383,6 @@ void channel_set_owner(struct channel *channel, struct subd *owner);
 /* Channel has failed, but can try again. */
 void channel_fail_transient(struct channel *channel,
 			    const char *fmt, ...) PRINTF_FMT(2,3);
-/* Channel has failed, but can try again after a minute. */
-void channel_fail_transient_delayreconnect(struct channel *channel,
-					   const char *fmt,...) PRINTF_FMT(2,3);
 
 /* Channel has failed, give up on it. */
 void channel_fail_permanent(struct channel *channel,
@@ -435,8 +440,7 @@ struct channel *find_channel_by_alias(const struct peer *peer,
 
 void channel_set_last_tx(struct channel *channel,
 			 struct bitcoin_tx *tx,
-			 const struct bitcoin_signature *sig,
-			 enum wallet_tx_type type);
+			 const struct bitcoin_signature *sig);
 
 static inline bool channel_can_add_htlc(const struct channel *channel)
 {

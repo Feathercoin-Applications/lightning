@@ -29,6 +29,9 @@ struct half_chan {
 
 	/* Token bucket */
 	u8 tokens;
+
+	/* Disabled channel waiting for a channel_update from both sides. */
+	bool zombie;
 };
 
 struct chan {
@@ -98,11 +101,6 @@ static inline bool chan_eq_scid(const struct chan *c,
 
 HTABLE_DEFINE_TYPE(struct chan, chan_map_scid, hash_scid, chan_eq_scid, chan_map);
 
-/* For a small number of channels (by far the most common) we use a simple
- * array, with empty buckets NULL.  For larger, we use a proper hash table,
- * with the extra allocation that implies. */
-#define NUM_IMMEDIATE_CHANS (sizeof(struct chan_map) / sizeof(struct chan *) - 1)
-
 struct node {
 	struct node_id id;
 
@@ -117,10 +115,15 @@ struct node {
 	u8 tokens;
 
 	/* Channels connecting us to other nodes */
-	union {
-		struct chan_map map;
-		struct chan *arr[NUM_IMMEDIATE_CHANS+1];
-	} chans;
+	/* For a small number of channels (by far the most common) we
+	 * use a simple array, with empty buckets NULL.  For larger, we use a
+	 * proper hash table, with the extra allocations that implies.
+	 *
+	 * As of November 2022, 5 or 6 gives the optimal size.
+	 */
+	struct chan *chan_arr[6];
+	/* If we have more than that, we use a hash. */
+	struct chan_map *chan_map;
 };
 
 const struct node_id *node_map_keyof_node(const struct node *n);
@@ -203,7 +206,7 @@ struct routing_state {
 	struct pending_node_map *pending_node_map;
 
 	/* channel_announcement which are pending short_channel_id lookup */
-	struct pending_cannouncement_map pending_cannouncements;
+	struct pending_cannouncement_map *pending_cannouncements;
 
 	/* Gossip store */
 	struct gossip_store *gs;
@@ -367,7 +370,8 @@ bool routing_add_channel_update(struct routing_state *rstate,
 				u32 index,
 				struct peer *peer,
 				bool ignore_timestamp,
-				bool force_spam_flag);
+				bool force_spam_flag,
+				bool force_zombie_flag);
 /**
  * Add a node_announcement to the network view without checking it
  *
@@ -430,6 +434,9 @@ void routing_expire_channels(struct routing_state *rstate, u32 blockheight);
 bool would_ratelimit_cupdate(struct routing_state *rstate,
 			     const struct half_chan *hc,
 			     u32 timestamp);
+
+/* Does this node have public, non-zombie channels? */
+bool node_has_broadcastable_channels(const struct node *node);
 
 /* Returns an error string if there are unfinalized entries after load */
 const char *unfinalized_entries(const tal_t *ctx, struct routing_state *rstate);

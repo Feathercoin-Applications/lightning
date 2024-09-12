@@ -15,13 +15,13 @@ def test_invoice(node_factory, chainparams):
     l1, l2 = node_factory.line_graph(2, fundchannel=False, opts={'log-level': 'io'})
 
     addr1 = l2.rpc.newaddr('bech32')['bech32']
-    addr2 = l2.rpc.newaddr('p2sh-segwit')['p2sh-segwit']
+    addr2 = '2MxqzNANJNAdMjHQq8ZLkwzooxAFiRzXvEz' if not chainparams['elements'] else 'XGx1E2JSTLZLmqYMAo3CGpsco85aS7so33'
     before = int(time.time())
     inv = l1.rpc.invoice(123000, 'label', 'description', 3700, [addr1, addr2])
 
     # Side note: invoice calls out to listincoming, so check JSON id is as expected
     myname = os.path.splitext(os.path.basename(sys.argv[0]))[0]
-    l1.daemon.wait_for_log(r": {}:invoice#[0-9]*/cln:listincoming#[0-9]*\[OUT\]".format(myname))
+    l1.daemon.wait_for_log(r': "{}:invoice#[0-9]*/cln:listincoming#[0-9]*"\[OUT\]'.format(myname))
 
     after = int(time.time())
     b11 = l1.rpc.decodepay(inv['bolt11'])
@@ -170,7 +170,7 @@ def test_invoice_routeboost(node_factory, bitcoind):
     # Route array has single route with single element.
     r = only_one(only_one(l1.rpc.decodepay(inv['bolt11'])['routes']))
     assert r['pubkey'] == l1.info['id']
-    assert r['short_channel_id'] == l2.rpc.listpeers(l1.info['id'])['peers'][0]['channels'][0]['short_channel_id']
+    assert r['short_channel_id'] == l2.rpc.listpeerchannels(l1.info['id'])['channels'][0]['short_channel_id']
     assert r['fee_base_msat'] == 1
     assert r['fee_proportional_millionths'] == 10
     assert r['cltv_expiry_delta'] == 6
@@ -233,7 +233,7 @@ def test_invoice_routeboost_private(node_factory, bitcoind):
     # Make sure channel is totally public.
     wait_for(lambda: [c['public'] for c in l2.rpc.listchannels(scid_dummy)['channels']] == [True, True])
 
-    alias = only_one(only_one(l1.rpc.listpeers(l2.info['id'])['peers'])['channels'])['alias']['local']
+    alias = only_one(l1.rpc.listpeerchannels(l2.info['id'])['channels'])['alias']['local']
     # Since there's only one route, it will reluctantly hint that even
     # though it's private
     inv = l2.rpc.invoice(amount_msat=123456, label="inv0", description="?")
@@ -531,6 +531,19 @@ def test_waitanyinvoice(node_factory, executor):
     l2.rpc.check_request_schemas = False
     with pytest.raises(RpcError):
         l2.rpc.waitanyinvoice('non-number')
+
+
+def test_signinvoice(node_factory, executor):
+    # Setup
+    l1, l2 = node_factory.line_graph(2)
+
+    # Create an invoice for l1
+    inv1 = l1.rpc.invoice(1000, 'inv1', 'inv1')['bolt11']
+    assert l1.rpc.decodepay(inv1)['payee'] == l1.info['id']
+
+    # Have l2 re-sign the invoice
+    inv2 = l2.rpc.signinvoice(inv1)['bolt11']
+    assert l1.rpc.decodepay(inv2)['payee'] == l2.info['id']
 
 
 def test_waitanyinvoice_reversed(node_factory, executor):

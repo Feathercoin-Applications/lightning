@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 export DEBIAN_FRONTEND=noninteractive
-export BITCOIN_VERSION=0.20.1
+export BITCOIN_VERSION=24.0.1
 export ELEMENTS_VERSION=0.18.1.8
 export RUST_VERSION=stable
 
@@ -56,9 +56,9 @@ sudo chmod 0440 /etc/sudoers.d/tester
 
 (
     cd /tmp/ || exit 1
-    wget https://storage.googleapis.com/c-lightning-tests/bitcoin-$BITCOIN_VERSION-x86_64-linux-gnu.tar.bz2
+    wget https://bitcoincore.org/bin/bitcoin-core-${BITCOIN_VERSION}/bitcoin-${BITCOIN_VERSION}-x86_64-linux-gnu.tar.gz
     wget -q https://storage.googleapis.com/c-lightning-tests/elements-$ELEMENTS_VERSION-x86_64-linux-gnu.tar.bz2
-    tar -xjf bitcoin-$BITCOIN_VERSION-x86_64-linux-gnu.tar.bz2
+    tar -xf bitcoin-$BITCOIN_VERSION-x86_64-linux-gnu.tar.gz
     tar -xjf elements-$ELEMENTS_VERSION-x86_64-linux-gnu.tar.bz2
     sudo mv bitcoin-$BITCOIN_VERSION/bin/* /usr/local/bin
     sudo mv elements-$ELEMENTS_VERSION/bin/* /usr/local/bin
@@ -69,7 +69,17 @@ sudo chmod 0440 /etc/sudoers.d/tester
        elements-$ELEMENTS_VERSION
 )
 
-if [ "$RUST" == "1" ]; then
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
-      -y --default-toolchain ${RUST_VERSION}
-fi
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
+     -y --default-toolchain ${RUST_VERSION}
+
+# We also need a relatively recent protobuf-compiler, at least 3.12.0,
+# in order to support the experimental `optional` flag.
+PROTOC_VERSION=3.15.8
+PB_REL="https://github.com/protocolbuffers/protobuf/releases"
+curl -LO $PB_REL/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip
+sudo unzip protoc-3.15.8-linux-x86_64.zip -d /usr/local/
+sudo chmod a+x /usr/local/bin/protoc
+export PROTOC=/usr/local/bin/protoc
+export PATH=$PATH:/usr/local/bin
+env
+ls -lha /usr/local/bin

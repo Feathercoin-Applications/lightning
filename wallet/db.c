@@ -67,6 +67,10 @@ static void migrate_payments_scids_as_integers(struct lightningd *ld,
 					       struct db *db,
 					       const struct migration_context *mc);
 
+static void fillin_missing_lease_satoshi(struct lightningd *ld,
+					 struct db *db,
+					 const struct migration_context *mc);
+
 /* Do not reorder or remove elements from this array, it is used to
  * migrate existing databases from a previous state, based on the
  * string indices */
@@ -492,6 +496,8 @@ static struct migration dbmigrations[] = {
     /* remote signatures for channel announcement */
     {SQL("ALTER TABLE channels ADD remote_ann_node_sig BLOB;"), NULL},
     {SQL("ALTER TABLE channels ADD remote_ann_bitcoin_sig BLOB;"), NULL},
+    /* FIXME: We now use the transaction_annotations table to type each
+     * input and output instead of type and channel_id! */
     /* Additional information for transaction tracking and listing */
     {SQL("ALTER TABLE transactions ADD type BIGINT;"), NULL},
     /* Not a foreign key on purpose since we still delete channels from
@@ -912,7 +918,10 @@ static struct migration dbmigrations[] = {
 	 ", PRIMARY KEY(in_channel_scid, in_htlc_id))"), NULL},
     {SQL("INSERT INTO forwards SELECT"
 	 " in_channel_scid"
-	 ", (SELECT channel_htlc_id FROM channel_htlcs WHERE id = forwarded_payments.in_htlc_id)"
+	 ", COALESCE("
+	 "    (SELECT channel_htlc_id FROM channel_htlcs WHERE id = forwarded_payments.in_htlc_id),"
+	 "    -_ROWID_"
+	 "  )"
 	 ", out_channel_scid"
 	 ", (SELECT channel_htlc_id FROM channel_htlcs WHERE id = forwarded_payments.out_htlc_id)"
 	 ", in_msatoshi"
@@ -940,15 +949,11 @@ static struct migration dbmigrations[] = {
     /* A reference into our own invoicerequests table, if it was made from one */
     {SQL("ALTER TABLE payments ADD COLUMN local_invreq_id BLOB DEFAULT NULL REFERENCES invoicerequests(invreq_id);"), NULL},
     /* FIXME: Remove payments local_offer_id column! */
+    {SQL("ALTER TABLE channel_funding_inflights ADD COLUMN lease_satoshi BIGINT;"), NULL},
+    {SQL("ALTER TABLE channels ADD require_confirm_inputs_remote INTEGER DEFAULT 0;"), NULL},
+    {SQL("ALTER TABLE channels ADD require_confirm_inputs_local INTEGER DEFAULT 0;"), NULL},
+    {NULL, fillin_missing_lease_satoshi},
 };
-
-/* Released versions are of form v{num}[.{num}]* */
-static bool is_released_version(void)
-{
-	if (version()[0] != 'v')
-		return false;
-	return strcspn(version()+1, ".0123456789") == strlen(version()+1);
-}
 
 /**
  * db_migrate - Apply all remaining migrations from the current version
@@ -958,6 +963,7 @@ static bool db_migrate(struct lightningd *ld, struct db *db,
 {
 	/* Attempt to read the version from the database */
 	int current, orig, available;
+	char *err_msg;
 	struct db_stmt *stmt;
 	const struct migration_context mc = {
 	    .bip32_base = bip32_base,
@@ -969,16 +975,22 @@ static bool db_migrate(struct lightningd *ld, struct db *db,
 
 	if (current == -1)
 		log_info(ld->log, "Creating database");
-	else if (available < current)
-		db_fatal("Refusing to migrate down from version %u to %u",
+	else if (available < current) {
+		err_msg = tal_fmt(tmpctx, "Refusing to migrate down from version %u to %u",
 			 current, available);
-	else if (current != available) {
+		log_info(ld->log, "%s", err_msg);
+		db_fatal("%s", err_msg);
+	} else if (current != available) {
 		if (ld->db_upgrade_ok && *ld->db_upgrade_ok == false) {
-			db_fatal("Refusing to upgrade db from version %u to %u (database-upgrade=false)",
+			err_msg = tal_fmt(tmpctx, "Refusing to upgrade db from version %u to %u (database-upgrade=false)",
 				 current, available);
+			log_info(ld->log, "%s", err_msg);
+			db_fatal("%s", err_msg);
 		} else if (!ld->db_upgrade_ok && !is_released_version()) {
-			db_fatal("Refusing to irreversibly upgrade db from version %u to %u in non-final version %s (use --database-upgrade=true to override)",
-				 current, available, version());
+			err_msg = tal_fmt(tmpctx, "Refusing to irreversibly upgrade db from version %u to %u in non-final version %s (use --database-upgrade=true to override)",
+					    current, available, version());
+			log_info(ld->log, "%s", err_msg);
+			db_fatal("%s", err_msg);
 		}
 		log_info(ld->log, "Updating database from version %u to %u",
 			 current, available);
@@ -1483,6 +1495,7 @@ static void migrate_channels_scids_as_integers(struct lightningd *ld,
 {
 	struct db_stmt *stmt;
 	char **scids = tal_arr(tmpctx, char *, 0);
+	size_t changes;
 
 	stmt = db_prepare_v2(db, SQL("SELECT short_channel_id FROM channels"));
 	db_query_prepared(stmt);
@@ -1494,6 +1507,7 @@ static void migrate_channels_scids_as_integers(struct lightningd *ld,
 	}
 	tal_free(stmt);
 
+	changes = 0;
 	for (size_t i = 0; i < tal_count(scids); i++) {
 		struct short_channel_id scid;
 		if (!short_channel_id_from_str(scids[i], strlen(scids[i]), &scid))
@@ -1506,11 +1520,20 @@ static void migrate_channels_scids_as_integers(struct lightningd *ld,
 		db_bind_scid(stmt, 0, &scid);
 		db_bind_text(stmt, 1, scids[i]);
 		db_exec_prepared_v2(stmt);
+
+		/* This was reported to happen with an (old, closed) channel: that we'd have
+		 * more than one change here!  That's weird, but just log about it. */
 		if (db_count_changes(stmt) != 1)
-			db_fatal("Converting channels.short_channel_id '%s' gave %zu changes != 1?",
-				 scids[i], db_count_changes(stmt));
+			log_broken(ld->log,
+				   "migrate_channels_scids_as_integers: converting channels.short_channel_id '%s' gave %zu changes != 1!",
+				   scids[i], db_count_changes(stmt));
+		changes += db_count_changes(stmt);
 		tal_free(stmt);
 	}
+
+	if (changes != tal_count(scids))
+		fatal("migrate_channels_scids_as_integers: only converted %zu of %zu scids!",
+		      changes, tal_count(scids));
 
 	/* FIXME: We cannot use ->delete_columns to remove
 	 * short_channel_id, as other tables reference the channels
@@ -1559,4 +1582,17 @@ static void migrate_payments_scids_as_integers(struct lightningd *ld,
 
 	if (!db->config->delete_columns(db, "payments", colnames, ARRAY_SIZE(colnames)))
 		db_fatal("Could not delete payments.failchannel");
+}
+
+static void fillin_missing_lease_satoshi(struct lightningd *ld,
+					 struct db *db,
+					 const struct migration_context *mc)
+{
+	struct db_stmt *stmt;
+
+	stmt = db_prepare_v2(db, SQL("UPDATE channel_funding_inflights"
+				     " SET lease_satoshi = 0"
+				     " WHERE lease_satoshi IS NULL;"));
+	db_exec_prepared_v2(stmt);
+	tal_free(stmt);
 }

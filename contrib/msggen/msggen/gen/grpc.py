@@ -210,6 +210,11 @@ class GrpcGenerator(IGenerator):
                 if f.path in overrides:
                     typename = overrides[f.path]
                 self.write(f"\t{opt}{typename} {f.normalized()} = {i};\n", False)
+            elif isinstance(f, CompositeField):
+                typename = f.typename
+                if f.path in overrides:
+                    typename = overrides[f.path]
+                self.write(f"\t{opt}{typename} {f.normalized()} = {i};\n", False)
 
         self.write(f"""}}
         """)
@@ -256,11 +261,14 @@ class GrpcConverterGenerator(IGenerator):
         for f in field.fields:
             if isinstance(f, ArrayField):
                 self.generate_array(prefix, f)
+            elif isinstance(f, CompositeField):
+                self.generate_composite(prefix, f)
 
+        pbname = self.to_camel_case(field.typename)
         # And now we can convert the current field:
         self.write(f"""\
         #[allow(unused_variables)]
-        impl From<{prefix}::{field.typename}> for pb::{field.typename} {{
+        impl From<{prefix}::{field.typename}> for pb::{pbname} {{
             fn from(c: {prefix}::{field.typename}) -> Self {{
                 Self {{
         """)
@@ -314,19 +322,45 @@ class GrpcConverterGenerator(IGenerator):
                     'hash?': f'c.{name}.map(|v| v.to_vec())',
                     'secret': f'c.{name}.to_vec()',
                     'secret?': f'c.{name}.map(|v| v.to_vec())',
+
+                    'msat_or_any': f'Some(c.{name}.into())',
+                    'msat_or_all': f'Some(c.{name}.into())',
+                    'msat_or_all?': f'c.{name}.map(|o|o.into())',
+                    'feerate?': f'c.{name}.map(|o|o.into())',
+                    'feerate': f'Some(c.{name}.into())',
+                    'outpoint?': f'c.{name}.map(|o|o.into())',
+                    'TlvStream?': f'c.{name}.map(|s| s.into())',
+                    'RoutehintList?': f'c.{name}.map(|rl| rl.into())',
+
+
                 }.get(
                     typ,
                     f'c.{name}'  # default to just assignment
                 )
 
+                if f.deprecated:
+                    self.write(f"#[allow(deprecated)]\n", numindent=3)
                 self.write(f"{name}: {rhs}, // Rule #2 for type {typ}\n", numindent=3)
 
+            elif isinstance(f, CompositeField):
+                rhs = ""
+                if f.required:
+                    rhs = f'Some(c.{name}.into())'
+                else:
+                    rhs = f'c.{name}.map(|v| v.into())'
+                self.write(f"{name}: {rhs},\n", numindent=3)
         self.write(f"""\
                 }}
             }}
         }}
 
         """)
+
+    def to_camel_case(self, snake_str):
+        components = snake_str.split('_')
+        # We capitalize the first letter of each component except the first one
+        # with the 'title' method and join them together.
+        return components[0] + ''.join(x.title() for x in components[1:])
 
     def generate_requests(self, service):
         for meth in service.methods:
@@ -349,13 +383,14 @@ class GrpcConverterGenerator(IGenerator):
         use cln_rpc::model::{responses,requests};
         use crate::pb;
         use std::str::FromStr;
-        use bitcoin_hashes::sha256::Hash as Sha256;
-        use bitcoin_hashes::Hash;
+        use bitcoin::hashes::sha256::Hash as Sha256;
+        use bitcoin::hashes::Hash;
         use cln_rpc::primitives::PublicKey;
 
         """)
 
         self.generate_responses(service)
+        self.generate_requests(service)
 
     def write(self, text: str, numindent: int = 0) -> None:
         raw = dedent(text)
@@ -370,6 +405,7 @@ class GrpcUnconverterGenerator(GrpcConverterGenerator):
     """
     def generate(self, service: Service):
         self.generate_requests(service)
+        self.generate_responses(service)
 
     def generate_composite(self, prefix, field: CompositeField) -> None:
         # First pass: generate any sub-fields before we generate the
@@ -380,12 +416,15 @@ class GrpcUnconverterGenerator(GrpcConverterGenerator):
         for f in field.fields:
             if isinstance(f, ArrayField):
                 self.generate_array(prefix, f)
+            elif isinstance(f, CompositeField):
+                self.generate_composite(prefix, f)
 
+        pbname = self.to_camel_case(field.typename)
         # And now we can convert the current field:
         self.write(f"""\
         #[allow(unused_variables)]
-        impl From<pb::{field.typename}> for {prefix}::{field.typename} {{
-            fn from(c: pb::{field.typename}) -> Self {{
+        impl From<pb::{pbname}> for {prefix}::{field.typename} {{
+            fn from(c: pb::{pbname}) -> Self {{
                 Self {{
         """)
 
@@ -398,12 +437,22 @@ class GrpcUnconverterGenerator(GrpcConverterGenerator):
                     'u32': f's',
                     'secret': f's.try_into().unwrap()'
                 }.get(typ, f's.into()')
+
+                # TODO fix properly
+                if typ in ["ListtransactionsTransactionsType"]:
+                    continue
+                if name == 'state_changes':
+                    self.write(f" state_changes: None,")
+                    continue
+
                 if f.required:
                     self.write(f"{name}: c.{name}.into_iter().map(|s| {mapping}).collect(), // Rule #4\n", numindent=3)
                 else:
                     self.write(f"{name}: Some(c.{name}.into_iter().map(|s| {mapping}).collect()), // Rule #4\n", numindent=3)
 
             elif isinstance(f, EnumField):
+                if f.path == 'ListPeers.peers[].channels[].htlcs[].state':
+                    continue
                 if f.required:
                     self.write(f"{name}: c.{name}.try_into().unwrap(),\n", numindent=3)
                 else:
@@ -415,7 +464,12 @@ class GrpcUnconverterGenerator(GrpcConverterGenerator):
                 # types, or have some conversion such as
                 # hex-decoding. Also includes the `Some()` that grpc
                 # requires for non-native types.
+
+                if name == "scriptPubKey":
+                    name = "script_pub_key"
+
                 rhs = {
+                    'u8': f'c.{name} as u8',
                     'u16': f'c.{name} as u16',
                     'u16?': f'c.{name}.map(|v| v as u16)',
                     'hex': f'hex::encode(&c.{name})',
@@ -446,6 +500,13 @@ class GrpcUnconverterGenerator(GrpcConverterGenerator):
                     f'c.{name}'  # default to just assignment
                 )
                 self.write(f"{name}: {rhs}, // Rule #1 for type {typ}\n", numindent=3)
+            elif isinstance(f, CompositeField):
+                rhs = ""
+                if f.required:
+                    rhs = f'c.{name}.unwrap().into()'
+                else:
+                    rhs = f'c.{name}.map(|v| v.into())'
+                self.write(f"{name}: {rhs},\n", numindent=3)
 
         self.write(f"""\
                 }}

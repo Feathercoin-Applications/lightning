@@ -201,7 +201,7 @@ static void gossipd_new_blockheight_reply(struct subd *gossipd,
 	}
 
 	/* Now, finally update getinfo's blockheight */
-	gossipd->ld->blockheight = ptr2int(blockheight);
+	gossipd->ld->gossip_blockheight = ptr2int(blockheight);
 }
 
 void gossip_notify_new_block(struct lightningd *ld, u32 blockheight)
@@ -262,7 +262,8 @@ void gossip_init(struct lightningd *ld, int connectd_fd)
 	    ld->announceable,
 	    IFDEV(ld->dev_gossip_time ? &ld->dev_gossip_time: NULL, NULL),
 	    IFDEV(ld->dev_fast_gossip, false),
-	    IFDEV(ld->dev_fast_gossip_prune, false));
+	    IFDEV(ld->dev_fast_gossip_prune, false),
+	    ld->config.ip_discovery);
 
 	subd_req(ld->gossip, ld->gossip, take(msg), -1, 0,
 		 gossipd_init_done, NULL);

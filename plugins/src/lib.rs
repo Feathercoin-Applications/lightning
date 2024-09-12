@@ -1,5 +1,6 @@
 use crate::codec::{JsonCodec, JsonRpcCodec};
-pub use anyhow::{anyhow, Context};
+pub use anyhow::anyhow;
+use anyhow::Context;
 use futures::sink::SinkExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 extern crate log;
@@ -16,9 +17,9 @@ use tokio_stream::StreamExt;
 use tokio_util::codec::FramedRead;
 use tokio_util::codec::FramedWrite;
 
-pub mod codec;
-pub mod logging;
-mod messages;
+mod codec;
+mod logging;
+pub mod messages;
 
 #[macro_use]
 extern crate serde_json;
@@ -46,6 +47,7 @@ where
     rpcmethods: HashMap<String, RpcMethod<S>>,
     subscriptions: HashMap<String, Subscription<S>>,
     dynamic: bool,
+    #[allow(unused)]
     nonnumericids: bool,
 }
 
@@ -494,6 +496,12 @@ where
             .filter(|o| o.name() == name)
             .next()
             .map(|co| co.value.clone().unwrap_or(co.default().clone()))
+    }
+
+    /// return the cln configuration send to the
+    /// plugin after the initialization.
+    pub fn configuration(&self) -> Configuration {
+        self.configuration.clone()
     }
 }
 

@@ -520,7 +520,6 @@ def test_withdraw_misc(node_factory, bitcoind, chainparams):
     dont_spend_outputs(l1, out['txid'])
 
     # Now send some money to l2.
-    # lightningd uses P2SH-P2WPKH
     waddr = l2.rpc.newaddr('bech32')['bech32']
     out = l1.rpc.withdraw(waddr, amount)
     bitcoind.generate_block(1)
@@ -874,7 +873,7 @@ def test_cli(node_factory):
     assert 'help [command]\n    List available commands, or give verbose help on one {command}' in out
 
     # Check JSON id is as expected
-    l1.daemon.wait_for_log(r"jsonrpc#[0-9]*: cli:help#[0-9]*\[IN\]")
+    l1.daemon.wait_for_log(r'jsonrpc#[0-9]*: "cli:help#[0-9]*"\[IN\]')
 
     # Test JSON output.
     out = subprocess.check_output(['cli/lightning-cli',
@@ -936,6 +935,39 @@ def test_cli(node_factory):
                                    'help', 'help']).decode('utf-8')
     j, _ = json.JSONDecoder().raw_decode(out)
     assert j == {'help': [{'command': 'help [command]'}]}
+
+    # lightningd errors should exit with status 1.
+    ret = subprocess.run(['cli/lightning-cli',
+                          '--network={}'.format(TEST_NETWORK),
+                          '--lightning-dir={}'
+                          .format(l1.daemon.lightning_dir),
+                          'unknown-command'])
+    assert ret.returncode == 1
+
+    # Can't contact will exit with status code 2.
+    ret = subprocess.run(['cli/lightning-cli',
+                          '--network={}'.format(TEST_NETWORK),
+                          '--lightning-dir=xxx',
+                          'help'])
+    assert ret.returncode == 2
+
+    # Malformed parameter (invalid json) will exit with status code 3.
+    ret = subprocess.run(['cli/lightning-cli',
+                          '--network={}'.format(TEST_NETWORK),
+                          '--lightning-dir={}'
+                          .format(l1.daemon.lightning_dir),
+                          'listpeers',
+                          '[xxx]'])
+    assert ret.returncode == 3
+
+    # Bad usage should exit with status 3.
+    ret = subprocess.run(['cli/lightning-cli',
+                          '--bad-param',
+                          '--network={}'.format(TEST_NETWORK),
+                          '--lightning-dir={}'
+                          .format(l1.daemon.lightning_dir),
+                          'help'])
+    assert ret.returncode == 3
 
     # Test missing parameters.
     try:
@@ -1011,6 +1043,121 @@ def test_cli(node_factory):
     assert [l for l in lines if not re.search(r'^help\[[0-9]*\].', l)] == ['format-hint=simple']
 
 
+def test_cli_commando(node_factory):
+    l1, l2 = node_factory.line_graph(2, fundchannel=False,
+                                     opts={'log-level': 'io'})
+    rune = l2.rpc.commando_rune()['rune']
+
+    # Invalid peer id.
+    val = subprocess.run(['cli/lightning-cli',
+                          '--commando=00',
+                          '--network={}'.format(TEST_NETWORK),
+                          '--lightning-dir={}'
+                          .format(l1.daemon.lightning_dir),
+                          'help'])
+    assert val.returncode == 3
+
+    # Valid peer id, but needs rune!
+    val = subprocess.run(['cli/lightning-cli',
+                          '--commando={}'.format(l2.info['id']),
+                          '--network={}'.format(TEST_NETWORK),
+                          '--lightning-dir={}'
+                          .format(l1.daemon.lightning_dir),
+                          'help'])
+    assert val.returncode == 1
+
+    # This works!
+    out = subprocess.check_output(['cli/lightning-cli',
+                                   '--commando={}:{}'.format(l2.info['id'], rune),
+                                   '--network={}'.format(TEST_NETWORK),
+                                   '--lightning-dir={}'
+                                   .format(l1.daemon.lightning_dir),
+                                   'help']).decode('utf-8')
+    # Test some known output.
+    assert 'help [command]\n    List available commands, or give verbose help on one {command}' in out
+
+    # Check JSON id is as expected
+    l1.daemon.wait_for_log(r'jsonrpc#[0-9]*: "cli:help#[0-9]*"\[IN\]')
+
+    # And through l2...
+    l2.daemon.wait_for_log(r'jsonrpc#[0-9]*: "cli:help#[0-9]*/cln:commando#[0-9]*/commando:help#[0-9]*"\[IN\]')
+
+    # Test keyword input (forced)
+    out = subprocess.check_output(['cli/lightning-cli',
+                                   '--commando={}:{}'.format(l2.info['id'], rune),
+                                   '--network={}'.format(TEST_NETWORK),
+                                   '--lightning-dir={}'
+                                   .format(l1.daemon.lightning_dir),
+                                   '-J', '-k',
+                                   'help', 'command=help']).decode('utf-8')
+    j, _ = json.JSONDecoder().raw_decode(out)
+    assert 'help [command]' in j['help'][0]['verbose']
+
+    # Test ordered input (forced)
+    out = subprocess.check_output(['cli/lightning-cli',
+                                   '--commando={}:{}'.format(l2.info['id'], rune),
+                                   '--network={}'.format(TEST_NETWORK),
+                                   '--lightning-dir={}'
+                                   .format(l1.daemon.lightning_dir),
+                                   '-J', '-o',
+                                   'help', 'help']).decode('utf-8')
+    j, _ = json.JSONDecoder().raw_decode(out)
+    assert 'help [command]' in j['help'][0]['verbose']
+
+    # Test filtering
+    out = subprocess.check_output(['cli/lightning-cli',
+                                   '-c', '{}:{}'.format(l2.info['id'], rune),
+                                   '--network={}'.format(TEST_NETWORK),
+                                   '--lightning-dir={}'
+                                   .format(l1.daemon.lightning_dir),
+                                   '-J', '--filter={"help":[{"command":true}]}',
+                                   'help', 'help']).decode('utf-8')
+    j, _ = json.JSONDecoder().raw_decode(out)
+    assert j == {'help': [{'command': 'help [command]'}]}
+
+    # Test missing parameters.
+    try:
+        # This will error due to missing parameters.
+        # We want to check if lightningd will crash.
+        out = subprocess.check_output(['cli/lightning-cli',
+                                       '--commando={}:{}'.format(l2.info['id'], rune),
+                                       '--network={}'.format(TEST_NETWORK),
+                                       '--lightning-dir={}'
+                                       .format(l1.daemon.lightning_dir),
+                                       '-J', '-o',
+                                       'sendpay']).decode('utf-8')
+    except Exception:
+        pass
+
+    # Test it escapes JSON completely in both method and params.
+    # cli turns " into \", reply turns that into \\\".
+    out = subprocess.run(['cli/lightning-cli',
+                          '--commando={}:{}'.format(l2.info['id'], rune),
+                          '--network={}'.format(TEST_NETWORK),
+                          '--lightning-dir={}'
+                          .format(l1.daemon.lightning_dir),
+                          'x"[]{}'],
+                         stdout=subprocess.PIPE)
+    assert 'Unknown command' in out.stdout.decode('utf-8')
+
+    subprocess.check_output(['cli/lightning-cli',
+                             '--commando={}:{}'.format(l2.info['id'], rune),
+                             '--network={}'.format(TEST_NETWORK),
+                             '--lightning-dir={}'
+                             .format(l1.daemon.lightning_dir),
+                             'invoice', '123000', 'l"[]{}', 'd"[]{}']).decode('utf-8')
+    # Check label is correct, and also that cli's keyword parsing works.
+    out = subprocess.check_output(['cli/lightning-cli',
+                                   '--commando={}:{}'.format(l2.info['id'], rune),
+                                   '--network={}'.format(TEST_NETWORK),
+                                   '--lightning-dir={}'
+                                   .format(l1.daemon.lightning_dir),
+                                   '-k',
+                                   'listinvoices', 'label=l"[]{}']).decode('utf-8')
+    j = json.loads(out)
+    assert only_one(j['invoices'])['label'] == 'l"[]{}'
+
+
 def test_daemon_option(node_factory):
     """
     Make sure --daemon at least vaguely works!
@@ -1051,7 +1198,7 @@ def test_blockchaintrack(node_factory, bitcoind):
     """Check that we track the blockchain correctly across reorgs
     """
     l1 = node_factory.get_node(random_hsm=True)
-    addr = l1.rpc.newaddr(addresstype='all')['p2sh-segwit']
+    addr = l1.rpc.newaddr(addresstype='all')['bech32']
 
     ######################################################################
     # First failure scenario: rollback on startup doesn't work,
@@ -1066,7 +1213,7 @@ def test_blockchaintrack(node_factory, bitcoind):
     time.sleep(1)  # mempool is still unpredictable
     bitcoind.generate_block(1)
 
-    l1.daemon.wait_for_log(r'Owning output.* \(P2SH\).* CONFIRMED')
+    l1.daemon.wait_for_log(r'Owning output.* CONFIRMED')
     outputs = l1.rpc.listfunds()['outputs']
     assert len(outputs) == 1
 
@@ -1120,7 +1267,7 @@ def test_funding_reorg_private(node_factory, bitcoind):
     bitcoind.generate_block(1)                      # height 106
 
     daemon = 'DUALOPEND' if l1.config('experimental-dual-fund') else 'CHANNELD'
-    wait_for(lambda: only_one(l1.rpc.listpeers()['peers'][0]['channels'])['status']
+    wait_for(lambda: only_one(l1.rpc.listpeerchannels()['channels'])['status']
              == ['{}_AWAITING_LOCKIN:Funding needs 1 more confirmations to be ready.'.format(daemon)])
     bitcoind.generate_block(1)                      # height 107
     l1.wait_channel_active('106x1x0')
@@ -1177,7 +1324,7 @@ def test_funding_reorg_remote_lags(node_factory, bitcoind):
     bitcoind.generate_block(1)
     l1.daemon.wait_for_log(r'Peer transient failure .* short_channel_id changed to 104x1x0 \(was 103x1x0\)')
 
-    wait_for(lambda: only_one(l2.rpc.listpeers()['peers'][0]['channels'])['status'] == [
+    wait_for(lambda: only_one(l2.rpc.listpeerchannels()['channels'])['status'] == [
         'CHANNELD_NORMAL:Reconnected, and reestablished.',
         'CHANNELD_NORMAL:Channel ready for use. They need our announcement signatures.'])
 
@@ -1187,7 +1334,7 @@ def test_funding_reorg_remote_lags(node_factory, bitcoind):
     wait_for(lambda: chan_active(l2, '104x1x0', True))
     assert l2.rpc.listchannels('103x1x0')['channels'] == []
 
-    wait_for(lambda: only_one(l2.rpc.listpeers()['peers'][0]['channels'])['status'] == [
+    wait_for(lambda: only_one(l2.rpc.listpeerchannels()['channels'])['status'] == [
         'CHANNELD_NORMAL:Reconnected, and reestablished.',
         'CHANNELD_NORMAL:Channel ready for use. Channel announced.'])
 
@@ -1709,14 +1856,11 @@ def test_bad_onion_immediate_peer(node_factory, bitcoind):
 
 def test_newaddr(node_factory, chainparams):
     l1 = node_factory.get_node()
-    p2sh = l1.rpc.newaddr('p2sh-segwit')
-    assert 'bech32' not in p2sh
-    assert p2sh['p2sh-segwit'].startswith(chainparams['p2sh_prefix'])
     bech32 = l1.rpc.newaddr('bech32')
     assert 'p2sh-segwit' not in bech32
     assert bech32['bech32'].startswith(chainparams['bip173_prefix'])
     both = l1.rpc.newaddr('all')
-    assert both['p2sh-segwit'].startswith(chainparams['p2sh_prefix'])
+    assert 'p2sh-segwit' not in both
     assert both['bech32'].startswith(chainparams['bip173_prefix'])
 
 
@@ -2361,6 +2505,48 @@ def test_emergencyrecover(node_factory, bitcoind):
     assert l2.rpc.listfunds()["channels"][0]["state"] == "ONCHAIN"
 
 
+@unittest.skipIf(os.getenv('TEST_DB_PROVIDER', 'sqlite3') != 'sqlite3', "deletes database, which is assumed sqlite3")
+def test_restorefrompeer(node_factory, bitcoind):
+    """
+    Test restorefrompeer
+    """
+    l1, l2 = node_factory.get_nodes(2, [{'allow_broken_log': True,
+                                         'experimental-peer-storage': None,
+                                         'may_reconnect': True},
+                                        {'experimental-peer-storage': None,
+                                         'may_reconnect': True}])
+
+    l1.rpc.connect(l2.info['id'], 'localhost', l2.port)
+
+    c12, _ = l1.fundchannel(l2, 10**5)
+    assert l1.daemon.is_in_log('Peer storage sent!')
+    assert l2.daemon.is_in_log('Peer storage sent!')
+
+    l1.stop()
+    os.unlink(os.path.join(l1.daemon.lightning_dir, TEST_NETWORK, "lightningd.sqlite3"))
+
+    l1.start()
+    assert l1.daemon.is_in_log('Server started with public key')
+
+    l1.rpc.connect(l2.info['id'], 'localhost', l2.port)
+    l1.daemon.wait_for_log('peer_in WIRE_YOUR_PEER_STORAGE')
+
+    assert l1.rpc.restorefrompeer()['stubs'][0] == _['channel_id']
+
+    l1.daemon.wait_for_log('peer_out WIRE_ERROR')
+    l2.daemon.wait_for_log('State changed from CHANNELD_NORMAL to AWAITING_UNILATERAL')
+
+    bitcoind.generate_block(5, wait_for_mempool=1)
+    sync_blockheight(bitcoind, [l1, l2])
+
+    l1.daemon.wait_for_log(r'All outputs resolved.*')
+    wait_for(lambda: l1.rpc.listfunds()["channels"][0]["state"] == "ONCHAIN")
+
+    # Check if funds are recovered.
+    assert l1.rpc.listfunds()["channels"][0]["state"] == "ONCHAIN"
+    assert l2.rpc.listfunds()["channels"][0]["state"] == "ONCHAIN"
+
+
 def test_commitfee_option(node_factory):
     """Sanity check for the --commit-fee startup option."""
     l1, l2 = node_factory.get_nodes(2, opts=[{"commit-fee": "200"}, {}])
@@ -2515,7 +2701,7 @@ def test_listforwards_and_listhtlcs(node_factory, bitcoind):
     # Once channels are gone, htlcs are gone.
     for n in (l1, l2, l3, l4):
         # They might reconnect, but still will have no channels
-        wait_for(lambda: all(p['channels'] == [] for p in n.rpc.listpeers()['peers']))
+        wait_for(lambda: n.rpc.listpeerchannels()['channels'] == [])
         assert n.rpc.listhtlcs() == {'htlcs': []}
 
     # But forwards are not forgotten!
@@ -2645,6 +2831,18 @@ def test_force_feerates(node_factory):
         "max_acceptable": 150000}
 
 
+def test_datastore_escapeing(node_factory):
+    """ This test demonstrates that there is some character escaping issue
+        issue in the datastore API and error messages during startup that
+        affect plugins init method. """
+    setdata = '{"foo": "bar"}'
+    l1 = node_factory.get_node()
+    l1.rpc.datastore(key='foo_bar', string=setdata)
+    getdata = l1.rpc.listdatastore('foo_bar')['datastore'][0]['string']
+    assert not l1.daemon.is_in_log(r".*listdatastore error.*token has no index 0.*")
+    assert getdata == setdata
+
+
 def test_datastore(node_factory):
     l1 = node_factory.get_node()
 
@@ -2652,12 +2850,21 @@ def test_datastore(node_factory):
     assert l1.rpc.listdatastore() == {'datastore': []}
     assert l1.rpc.listdatastore('somekey') == {'datastore': []}
 
+    # Fail on empty array
+    with pytest.raises(RpcError, match='should not be empty'):
+        l1.rpc.listdatastore([])
+
     # Add entries.
     somedata = b'somedata'.hex()
     somedata_expect = {'key': ['somekey'],
                        'generation': 0,
                        'hex': somedata,
                        'string': 'somedata'}
+
+    # We should fail trying to insert into an empty array
+    with pytest.raises(RpcError, match='should not be empty'):
+        l1.rpc.datastore(key=[], hex=somedata)
+
     assert l1.rpc.datastore(key='somekey', hex=somedata) == somedata_expect
 
     assert l1.rpc.listdatastore() == {'datastore': [somedata_expect]}
@@ -2826,7 +3033,7 @@ def test_field_filter(node_factory, chainparams):
     l1, l2 = node_factory.get_nodes(2)
 
     addr1 = l1.rpc.newaddr('bech32')['bech32']
-    addr2 = l1.rpc.newaddr('p2sh-segwit')['p2sh-segwit']
+    addr2 = '2MxqzNANJNAdMjHQq8ZLkwzooxAFiRzXvEz' if not chainparams['elements'] else 'XGx1E2JSTLZLmqYMAo3CGpsco85aS7so33'
     inv = l1.rpc.invoice(123000, 'label', 'description', 3700, [addr1, addr2])
 
     # Simple case: single field

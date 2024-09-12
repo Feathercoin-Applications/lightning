@@ -102,6 +102,41 @@ static char *opt_set_s32(const char *arg, s32 *u)
 	return NULL;
 }
 
+char *opt_set_autobool_arg(const char *arg, enum opt_autobool *b)
+{
+	if (!strcasecmp(arg, "yes") ||
+	    !strcasecmp(arg, "true")) {
+		*b = OPT_AUTOBOOL_TRUE;
+		return NULL;
+	}
+	if (!strcasecmp(arg, "no") ||
+	    !strcasecmp(arg, "false")) {
+		*b = OPT_AUTOBOOL_FALSE;
+		return NULL;
+	}
+	if (!strcasecmp(arg, "auto") ||
+	    !strcasecmp(arg, "default")) {
+		*b = OPT_AUTOBOOL_AUTO;
+		return NULL;
+	}
+	return opt_invalid_argument(arg);
+}
+
+void opt_show_autobool(char buf[OPT_SHOW_LEN], const enum opt_autobool *b)
+{
+	switch (*b) {
+	case OPT_AUTOBOOL_TRUE:
+		strncpy(buf, "true", OPT_SHOW_LEN);
+		break;
+	case OPT_AUTOBOOL_FALSE:
+		strncpy(buf, "false", OPT_SHOW_LEN);
+		break;
+	case OPT_AUTOBOOL_AUTO:
+	default:
+		strncpy(buf, "auto", OPT_SHOW_LEN);
+	}
+}
+
 static char *opt_set_mode(const char *arg, mode_t *m)
 {
 	char *endp;
@@ -222,7 +257,7 @@ static char *opt_add_addr_withtype(const char *arg,
 	assert(arg != NULL);
 	dns_ok = !ld->always_use_proxy && ld->config.use_dns;
 
-	/* Will be overridden in next call iff has port */
+	/* Will be overridden in next call, if it has a port */
 	port = 0;
 	if (!separate_address_and_port(tmpctx, arg, &address, &port))
 		return tal_fmt(NULL, "Unable to parse address:port '%s'", arg);
@@ -230,6 +265,7 @@ static char *opt_add_addr_withtype(const char *arg,
 	if (is_ipaddr(address)
 	    || is_toraddr(address)
 	    || is_wildcardaddr(address)
+	    || (is_dnsaddr(address) && !ld->announce_dns)
 	    || ala != ADDR_ANNOUNCE) {
 		if (!parse_wireaddr_internal(arg, &wi, ld->portnum,
 					     wildcard_ok, dns_ok, false,
@@ -254,7 +290,7 @@ static char *opt_add_addr_withtype(const char *arg,
 	}
 
 	/* Add ADDR_TYPE_DNS to announce DNS hostnames */
-	if (is_dnsaddr(address) && ala & ADDR_ANNOUNCE) {
+	if (is_dnsaddr(address) && ld->announce_dns && (ala & ADDR_ANNOUNCE)) {
 		/* BOLT-hostnames #7:
 		 * The origin node:
 		 * ...
@@ -516,9 +552,15 @@ static char *opt_set_hsm_password(struct lightningd *ld)
 	int is_encrypted;
 
         is_encrypted = is_hsm_secret_encrypted("hsm_secret");
+	/* While lightningd is performing the first initialization
+	 * this check is always true because the file does not exist.
+	 *
+	 * Maybe the is_hsm_secret_encrypted is performing a not useful
+	 * check at this stage, but the hsm is a delicate part,
+	 * so it is a good information to have inside the log. */
 	if (is_encrypted == -1)
-		return tal_fmt(NULL, "Could not access 'hsm_secret': %s",
-			       strerror(errno));
+		log_info(ld->log, "'hsm_secret' does not exist (%s)",
+			 strerror(errno));
 
 	prompt(ld, "The hsm_secret is encrypted with a password. In order to "
 	       "decrypt it and start the node you must provide the password.");
@@ -801,8 +843,11 @@ static const struct config testnet_config = {
 
 	.use_dns = true,
 
-	/* Turn off IP address announcement discovered via peer `remote_addr` */
-	.disable_ip_discovery = false,
+	/* Excplicitly turns 'on' or 'off' IP discovery feature. */
+	.ip_discovery = OPT_AUTOBOOL_AUTO,
+
+	/* Public TCP port assumed for IP discovery. Defaults to chainparams. */
+	.ip_discovery_port = 0,
 
 	/* Sets min_effective_htlc_capacity - at 1000$/BTC this is 10ct */
 	.min_capacity_sat = 10000,
@@ -813,6 +858,8 @@ static const struct config testnet_config = {
 	.exp_offers = IFEXPERIMENTAL(true, false),
 
 	.allowdustreserve = false,
+
+	.require_confirmed_inputs = false,
 };
 
 /* aka. "Dude, where's my coins?" */
@@ -867,8 +914,11 @@ static const struct config mainnet_config = {
 
 	.use_dns = true,
 
-	/* Turn off IP address announcement discovered via peer `remote_addr` */
-	.disable_ip_discovery = false,
+	/* Excplicitly turns 'on' or 'off' IP discovery feature. */
+	.ip_discovery = OPT_AUTOBOOL_AUTO,
+
+	/* Public TCP port assumed for IP discovery. Defaults to chainparams. */
+	.ip_discovery_port = 0,
 
 	/* Sets min_effective_htlc_capacity - at 1000$/BTC this is 10ct */
 	.min_capacity_sat = 10000,
@@ -879,6 +929,8 @@ static const struct config mainnet_config = {
 	.exp_offers = IFEXPERIMENTAL(true, false),
 
 	.allowdustreserve = false,
+
+	.require_confirmed_inputs = false,
 };
 
 static void check_config(struct lightningd *ld)
@@ -997,10 +1049,10 @@ static char *opt_set_websocket_port(const char *arg, struct lightningd *ld)
 
 static char *opt_set_dual_fund(struct lightningd *ld)
 {
-	/* Dual funding implies anchor outputs */
+	/* Dual funding implies static remotkey */
 	feature_set_or(ld->our_features,
 		       take(feature_set_for_feature(NULL,
-						    OPTIONAL_FEATURE(OPT_ANCHOR_OUTPUTS))));
+						    OPTIONAL_FEATURE(OPT_STATIC_REMOTEKEY))));
 	feature_set_or(ld->our_features,
 		       take(feature_set_for_feature(NULL,
 						    OPTIONAL_FEATURE(OPT_DUAL_FUND))));
@@ -1026,6 +1078,17 @@ static char *opt_set_shutdown_wrong_funding(struct lightningd *ld)
 	return NULL;
 }
 
+static char *opt_set_peer_storage(struct lightningd *ld)
+{
+	feature_set_or(ld->our_features,
+		       take(feature_set_for_feature(NULL,
+						    OPTIONAL_FEATURE(OPT_PROVIDE_PEER_BACKUP_STORAGE))));
+	feature_set_or(ld->our_features,
+		       take(feature_set_for_feature(NULL,
+						    OPTIONAL_FEATURE(OPT_WANT_PEER_BACKUP_STORAGE))));
+	return NULL;
+}
+
 static char *opt_set_offers(struct lightningd *ld)
 {
 	ld->config.exp_offers = true;
@@ -1036,6 +1099,13 @@ static char *opt_set_db_upgrade(const char *arg, struct lightningd *ld)
 {
 	ld->db_upgrade_ok = tal(ld, bool);
 	return opt_set_bool_arg(arg, ld->db_upgrade_ok);
+}
+
+static char *opt_disable_ip_discovery(struct lightningd *ld)
+{
+	log_broken(ld->log, "--disable-ip-discovery has been deprecated, use --announce-addr-discovered=false");
+	ld->config.ip_discovery = OPT_AUTOBOOL_FALSE;
+	return NULL;
 }
 
 static void register_opts(struct lightningd *ld)
@@ -1097,6 +1167,13 @@ static void register_opts(struct lightningd *ld)
 	opt_register_early_noarg("--experimental-shutdown-wrong-funding",
 				 opt_set_shutdown_wrong_funding, ld,
 				 "EXPERIMENTAL: allow shutdown with alternate txids");
+	opt_register_early_noarg("--experimental-peer-storage",
+				 opt_set_peer_storage, ld,
+				 "EXPERIMENTAL: enable peer backup storage and restore");
+	opt_register_early_arg("--announce-addr-dns",
+			       opt_set_bool_arg, opt_show_bool,
+			       &ld->announce_dns,
+			       "Use DNS entries in --announce-addr and --addr (not widely supported!)");
 
 	opt_register_noarg("--help|-h", opt_lightningd_usage, ld,
 				 "Print this message.");
@@ -1121,6 +1198,9 @@ static void register_opts(struct lightningd *ld)
 	opt_register_arg("--funding-confirms", opt_set_u32, opt_show_u32,
 			 &ld->config.anchor_confirms,
 			 "Confirmations required for funding transaction");
+	opt_register_arg("--require-confirmed-inputs", opt_set_bool_arg, opt_show_bool,
+			 &ld->config.require_confirmed_inputs,
+			 "Confirmations required for inputs to funding transaction (v2 opens only)");
 	opt_register_arg("--cltv-delta", opt_set_u32, opt_show_u32,
 			 &ld->config.cltv_expiry_delta,
 			 "Number of blocks for cltv_expiry_delta");
@@ -1165,9 +1245,14 @@ static void register_opts(struct lightningd *ld)
 	opt_register_arg("--announce-addr", opt_add_announce_addr, NULL,
 			 ld,
 			 "Set an IP address (v4 or v6) or .onion v3 to announce, but not listen on");
-	opt_register_noarg("--disable-ip-discovery", opt_set_bool,
-			 &ld->config.disable_ip_discovery,
-			 "Turn off announcement of discovered public IPs");
+
+	opt_register_noarg("--disable-ip-discovery", opt_disable_ip_discovery, ld, opt_hidden);
+	opt_register_arg("--announce-addr-discovered", opt_set_autobool_arg, opt_show_autobool,
+			 &ld->config.ip_discovery,
+			 "Explicitly turns IP discovery 'on' or 'off'.");
+	opt_register_arg("--announce-addr-discovered-port", opt_set_uintval,
+			 opt_show_uintval, &ld->config.ip_discovery_port,
+			 "Sets the public TCP port to use for announcing discovered IPs.");
 
 	opt_register_noarg("--offline", opt_set_offline, ld,
 			   "Start in offline-mode (do not automatically reconnect and do not accept incoming connections)");
@@ -1372,6 +1457,9 @@ void handle_early_opts(struct lightningd *ld, int argc, char *argv[])
 	else
 		ld->config = mainnet_config;
 
+	/* Set the ln_port given from chainparams */
+	ld->config.ip_discovery_port = chainparams->ln_port;
+
 	/* Now we can initialize wallet_dsn */
 	ld->wallet_dsn = tal_fmt(ld, "sqlite3://%s/lightningd.sqlite3",
 				 ld->config_netdir);
@@ -1567,6 +1655,11 @@ static void add_config(struct lightningd *ld,
 				      feature_offered(ld->our_features
 						      ->bits[INIT_FEATURE],
 						      OPT_SHUTDOWN_WRONG_FUNDING));
+		} else if (opt->cb == (void *)opt_set_peer_storage) {
+			json_add_bool(response, name0,
+				      feature_offered(ld->our_features
+						      ->bits[INIT_FEATURE],
+						      OPT_PROVIDE_PEER_BACKUP_STORAGE));
 		} else if (opt->cb == (void *)plugin_opt_flag_set) {
 			/* Noop, they will get added below along with the
 			 * OPT_HASARG options. */
@@ -1577,6 +1670,9 @@ static void add_config(struct lightningd *ld,
 	} else if (opt->type & OPT_HASARG) {
 		if (opt->desc == opt_hidden) {
 			/* Ignore hidden options (deprecated) */
+		} else if (opt->show == (void *)opt_show_charp) {
+			/* Don't truncate! */
+			answer = tal_strdup(tmpctx, *(char **)opt->u.carg);
 		} else if (opt->show) {
 			opt->show(buf, opt->u.carg);
 			strcpy(buf + OPT_SHOW_LEN - 1, "...");
@@ -1588,14 +1684,7 @@ static void add_config(struct lightningd *ld,
 				json_add_primitive(response, name0, buf);
 				return;
 			}
-
-			/* opt_show_charp surrounds with "", strip them */
-			if (strstarts(buf, "\"")) {
-				char *end = strrchr(buf, '"');
-				memmove(end, end + 1, strlen(end));
-				answer = buf + 1;
-			} else
-				answer = buf;
+			answer = buf;
 		} else if (opt->cb_arg == (void *)opt_set_talstr
 			   || opt->cb_arg == (void *)opt_set_charp
 			   || is_restricted_print_if_nonnull(opt->cb_arg)) {

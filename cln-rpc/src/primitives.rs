@@ -1,29 +1,29 @@
-use std::fmt::{Display, Formatter};
 use anyhow::Context;
 use anyhow::{anyhow, Error, Result};
+use bitcoin::hashes::Hash as BitcoinHash;
 use serde::{Deserialize, Serialize};
 use serde::{Deserializer, Serializer};
+use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 use std::string::ToString;
-use bitcoin_hashes::Hash as BitcoinHash;
 
-pub use bitcoin_hashes::sha256::Hash as Sha256;
-pub use secp256k1::PublicKey;
+pub use bitcoin::hashes::sha256::Hash as Sha256;
+pub use bitcoin::secp256k1::PublicKey;
 
 #[derive(Copy, Clone, Serialize, Deserialize, Debug)]
 #[allow(non_camel_case_types)]
 pub enum ChannelState {
-    OPENINGD,
-    CHANNELD_AWAITING_LOCKIN,
-    CHANNELD_NORMAL,
-    CHANNELD_SHUTTING_DOWN,
-    CLOSINGD_SIGEXCHANGE,
-    CLOSINGD_COMPLETE,
-    AWAITING_UNILATERAL,
-    FUNDING_SPEND_SEEN,
-    ONCHAIN,
-    DUALOPEND_OPEN_INIT,
-    DUALOPEND_AWAITING_LOCKIN,
+    OPENINGD = 0,
+    CHANNELD_AWAITING_LOCKIN = 1,
+    CHANNELD_NORMAL = 2,
+    CHANNELD_SHUTTING_DOWN = 3,
+    CLOSINGD_SIGEXCHANGE = 4,
+    CLOSINGD_COMPLETE = 5,
+    AWAITING_UNILATERAL = 6,
+    FUNDING_SPEND_SEEN = 7,
+    ONCHAIN = 8,
+    DUALOPEND_OPEN_INIT = 9,
+    DUALOPEND_AWAITING_LOCKIN = 10,
 }
 
 #[derive(Copy, Clone, Serialize, Deserialize, Debug)]
@@ -62,11 +62,13 @@ pub struct Amount {
 
 impl Amount {
     pub fn from_msat(msat: u64) -> Amount {
-        Amount { msat: msat }
+        Amount { msat }
     }
+
     pub fn from_sat(sat: u64) -> Amount {
         Amount { msat: 1_000 * sat }
     }
+
     pub fn from_btc(btc: u64) -> Amount {
         Amount {
             msat: 100_000_000_000 * btc,
@@ -83,7 +85,7 @@ impl std::ops::Add for Amount {
 
     fn add(self, rhs: Self) -> Self::Output {
         Amount {
-            msat: self.msat + rhs.msat
+            msat: self.msat + rhs.msat,
         }
     }
 }
@@ -93,12 +95,12 @@ impl std::ops::Sub for Amount {
 
     fn sub(self, rhs: Self) -> Self::Output {
         Amount {
-            msat: self.msat - rhs.msat
+            msat: self.msat - rhs.msat,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShortChannelId(u64);
 
 impl Serialize for ShortChannelId {
@@ -234,7 +236,8 @@ impl<'de> Deserialize<'de> for Outpoint {
         let txid_bytes =
             hex::decode(splits[0]).map_err(|_| Error::custom("not a valid hex encoded txid"))?;
 
-        let txid= Sha256::from_slice(&txid_bytes).map_err(|e| Error::custom(format!("Invalid TxId: {}", e)))?;
+        let txid = Sha256::from_slice(&txid_bytes)
+            .map_err(|e| Error::custom(format!("Invalid TxId: {}", e)))?;
 
         let outnum: u32 = splits[1]
             .parse()
@@ -249,6 +252,41 @@ impl<'de> Deserialize<'de> for Outpoint {
 pub enum ChannelSide {
     LOCAL,
     REMOTE,
+}
+
+impl TryFrom<i32> for ChannelSide {
+    type Error = crate::Error;
+
+    fn try_from(value: i32) -> std::result::Result<Self, Self::Error> {
+        match value {
+            0 => Ok(ChannelSide::LOCAL),
+            1 => Ok(ChannelSide::REMOTE),
+            _ => Err(anyhow!(
+                "Invalid ChannelSide mapping, only 0 or 1 are allowed"
+            )),
+        }
+    }
+}
+
+impl TryFrom<i32> for ChannelState {
+    type Error = crate::Error;
+
+    fn try_from(value: i32) -> std::result::Result<Self, Self::Error> {
+        match value {
+            0 => Ok(ChannelState::OPENINGD),
+            1 => Ok(ChannelState::CHANNELD_AWAITING_LOCKIN),
+            2 => Ok(ChannelState::CHANNELD_NORMAL),
+            3 => Ok(ChannelState::CHANNELD_SHUTTING_DOWN),
+            4 => Ok(ChannelState::CLOSINGD_SIGEXCHANGE),
+            5 => Ok(ChannelState::CLOSINGD_COMPLETE),
+            6 => Ok(ChannelState::AWAITING_UNILATERAL),
+            7 => Ok(ChannelState::FUNDING_SPEND_SEEN),
+            8 => Ok(ChannelState::ONCHAIN),
+            9 => Ok(ChannelState::DUALOPEND_OPEN_INIT),
+            10 => Ok(ChannelState::DUALOPEND_AWAITING_LOCKIN),
+            _ => Err(anyhow!("Invalid channel state {}", value)),
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for Amount {
@@ -551,14 +589,20 @@ mod test {
 
     #[test]
     fn tlvstream() {
-	let stream = TlvStream {
-	    entries: vec![
-		TlvEntry { typ: 31337, value: vec![1,2,3,4,5]},
-			   TlvEntry { typ: 42, value: vec![]},
-	    ],
-	};
+        let stream = TlvStream {
+            entries: vec![
+                TlvEntry {
+                    typ: 31337,
+                    value: vec![1, 2, 3, 4, 5],
+                },
+                TlvEntry {
+                    typ: 42,
+                    value: vec![],
+                },
+            ],
+        };
 
-	let res = serde_json::to_string(&stream).unwrap();
+        let res = serde_json::to_string(&stream).unwrap();
         assert_eq!(res, "{\"31337\":\"0102030405\",\"42\":\"\"}");
     }
 }

@@ -32,9 +32,12 @@
 #include <wally_psbt.h>
 
 void json_add_uncommitted_channel(struct json_stream *response,
-				  const struct uncommitted_channel *uc)
+				  const struct uncommitted_channel *uc,
+				  /* Only set for listpeerchannels */
+				  const struct peer *peer)
 {
 	struct amount_msat total, ours;
+
 	if (!uc)
 		return;
 
@@ -43,6 +46,10 @@ void json_add_uncommitted_channel(struct json_stream *response,
 		return;
 
 	json_object_start(response, NULL);
+	if (peer) {
+		json_add_node_id(response, "peer_id", &peer->id);
+		json_add_bool(response, "peer_connected", peer->connected == PEER_CONNECTED);
+	}
 	json_add_string(response, "state", "OPENINGD");
 	json_add_string(response, "owner", "lightning_openingd");
 	json_add_string(response, "opener", "local");
@@ -171,6 +178,7 @@ wallet_commit_channel(struct lightningd *ld,
 			      uc->log,
 			      take(uc->transient_billboard),
 			      channel_flags,
+			      false, false,
 			      &uc->our_config,
 			      uc->minimum_depth,
 			      1, 1, 0,
@@ -1390,7 +1398,8 @@ static struct channel *stub_chan(struct command *cmd,
 			      LOCAL,
 			      NULL,
 			      "restored from static channel backup",
-			      0, our_config,
+			      0, false, false,
+			      our_config,
 			      0,
 			      1, 1, 1,
 			      &funding,
